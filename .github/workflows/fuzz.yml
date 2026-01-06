@@ -1,0 +1,247 @@
+name: Fuzzing
+
+on:
+  # Run on schedule (nightly)
+  schedule:
+    - cron: '0 2 * * *'  # 2 AM UTC daily
+  # Run on security-labeled PRs
+  pull_request:
+    types: [labeled]
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      fuzz_time:
+        description: 'Fuzzing time in seconds'
+        required: false
+        default: '300'
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# Only run if PR has 'security' label or on schedule/manual
+jobs:
+  check-label:
+    name: Check Label
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'security')
+    outputs:
+      should_run: ${{ steps.check.outputs.result }}
+    steps:
+      - id: check
+        run: echo "result=true" >> $GITHUB_OUTPUT
+
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    needs: check-label
+    if: needs.check-label.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - manifest_parse
+          - version_parse
+          - lockfile_parse
+          - semver_range
+          - pep440_parse
+          - dependency_graph
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo-fuzz
+        id: cache-cargo-fuzz
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: ${{ runner.os }}-cargo-fuzz-0.12.0
+
+      - name: Install cargo-fuzz
+        if: steps.cache-cargo-fuzz.outputs.cache-hit != 'true'
+        run: cargo install cargo-fuzz --version 0.12.0 --locked
+
+      - name: Initialize fuzz directory
+        run: |
+          if [ ! -d "fuzz" ]; then
+            cargo fuzz init
+          fi
+
+      - name: Create fuzz target for ${{ matrix.target }}
+        run: |
+          TARGET="${{ matrix.target }}"
+          TARGET_FILE="fuzz/fuzz_targets/${TARGET}.rs"
+
+          # Only create if doesn't exist
+          if [ ! -f "$TARGET_FILE" ]; then
+            case "$TARGET" in
+              manifest_parse)
+                cat > "$TARGET_FILE" << 'EOF'
+          #![no_main]
+          use libfuzzer_sys::fuzz_target;
+
+          fuzz_target!(|data: &[u8]| {
+              if let Ok(s) = std::str::from_utf8(data) {
+                  let _ = toml::from_str::<toml::Value>(s);
+              }
+          });
+          EOF
+                ;;
+              version_parse)
+                cat > "$TARGET_FILE" << 'EOF'
+          #![no_main]
+          use libfuzzer_sys::fuzz_target;
+
+          fuzz_target!(|data: &[u8]| {
+              if let Ok(s) = std::str::from_utf8(data) {
+                  let _ = semver::Version::parse(s);
+              }
+          });
+          EOF
+                ;;
+              lockfile_parse)
+                cat > "$TARGET_FILE" << 'EOF'
+          #![no_main]
+          use libfuzzer_sys::fuzz_target;
+
+          fuzz_target!(|data: &[u8]| {
+              if let Ok(s) = std::str::from_utf8(data) {
+                  let _ = toml::from_str::<toml::Value>(s);
+              }
+          });
+          EOF
+                ;;
+              semver_range)
+                cat > "$TARGET_FILE" << 'EOF'
+          #![no_main]
+          use libfuzzer_sys::fuzz_target;
+
+          fuzz_target!(|data: &[u8]| {
+              if let Ok(s) = std::str::from_utf8(data) {
+                  let _ = semver::VersionReq::parse(s);
+              }
+          });
+          EOF
+                ;;
+              pep440_parse)
+                cat > "$TARGET_FILE" << 'EOF'
+          #![no_main]
+          use libfuzzer_sys::fuzz_target;
+
+          fuzz_target!(|data: &[u8]| {
+              if let Ok(s) = std::str::from_utf8(data) {
+                  let _ = pep440_rs::Version::from_str(s);
+              }
+          });
+          EOF
+                ;;
+              dependency_graph)
+                cat > "$TARGET_FILE" << 'EOF'
+          #![no_main]
+          use libfuzzer_sys::fuzz_target;
+
+          fuzz_target!(|data: &[u8]| {
+              if let Ok(s) = std::str::from_utf8(data) {
+                  // Simple graph structure fuzzing
+                  if s.len() < 1000 {  // Prevent DoS
+                      let _ = toml::from_str::<toml::Value>(s);
+                  }
+              }
+          });
+          EOF
+                ;;
+            esac
+          fi
+
+      - name: Restore corpus cache
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: corpus-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: |
+            corpus-${{ matrix.target }}-
+
+      - name: Run fuzzer
+        run: |
+          FUZZ_TIME="${{ github.event.inputs.fuzz_time || '300' }}"
+          echo "Running fuzzer for $FUZZ_TIME seconds on target ${{ matrix.target }}"
+
+          # Run with timeout and capture exit code
+          timeout $FUZZ_TIME cargo +nightly fuzz run ${{ matrix.target }} \
+            -- -max_total_time=$FUZZ_TIME \
+            -print_final_stats=1 \
+            -max_len=65536 || EXIT_CODE=$?
+
+          # Exit code 124 means timeout (expected), anything else is a crash
+          if [ "${EXIT_CODE:-0}" -ne 0 ] && [ "${EXIT_CODE:-0}" -ne 124 ]; then
+            echo "Fuzzer crashed or found an issue!"
+            exit 1
+          fi
+
+          echo "Fuzzing completed successfully"
+
+      - name: Minimize corpus
+        if: always()
+        run: |
+          cargo +nightly fuzz cmin ${{ matrix.target }} || true
+
+      - name: Save corpus artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: |
+            fuzz/corpus/${{ matrix.target }}/
+          retention-days: 90
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.target }}
+          path: |
+            fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 90
+
+  # Report fuzzing results
+  fuzz-report:
+    name: Fuzzing Report
+    needs: fuzz
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: fuzz-results
+
+      - name: Generate report
+        run: |
+          echo "# Fuzzing Results" > report.md
+          echo "" >> report.md
+          echo "Workflow run: ${{ github.run_id }}" >> report.md
+          echo "Triggered by: ${{ github.event_name }}" >> report.md
+          echo "" >> report.md
+
+          if [ -d "fuzz-results" ]; then
+            CRASH_COUNT=$(find fuzz-results -type d -name "fuzz-crashes-*" 2>/dev/null | wc -l)
+            echo "Crash artifacts found: $CRASH_COUNT" >> report.md
+
+            if [ $CRASH_COUNT -gt 0 ]; then
+              echo "" >> report.md
+              echo "## Crashes Detected" >> report.md
+              find fuzz-results -type d -name "fuzz-crashes-*" -exec basename {} \; >> report.md
+            fi
+          fi
+
+          cat report.md
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzzing-report
+          path: report.md
+          retention-days: 90

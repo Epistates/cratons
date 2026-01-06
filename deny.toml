@@ -1,0 +1,198 @@
+# cargo-deny configuration for Coop package manager
+# https://embarkstudios.github.io/cargo-deny/
+#
+# Enterprise-Grade Dependency Policy
+# ===================================
+# This configuration enforces strict security, licensing, and supply chain
+# policies suitable for enterprise deployment.
+#
+# Run with: cargo deny check
+# CI integration: cargo deny check --show-stats
+
+[graph]
+# Target platforms for dependency analysis
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+# Include all features when analyzing
+all-features = true
+
+# =============================================================================
+# ADVISORIES - Security Vulnerability Policy
+# =============================================================================
+# 
+# This section enforces that no known security vulnerabilities are present
+# in dependencies. Uses the RustSec Advisory Database.
+#
+[advisories]
+# Policy: All vulnerability advisories emit errors by default.
+# Use the `ignore` list only for mitigated/accepted risks.
+
+# WARN: Flag unmaintained crates for review (workspace deps only)
+# Rationale: Unmaintained crates may have unpatched vulnerabilities
+unmaintained = "workspace"
+
+# DENY: Block yanked versions
+# Rationale: Yanked versions were removed for a reason (security, bugs)
+yanked = "deny"
+
+# Security advisory exceptions
+# Add entries here ONLY with security team approval and a remediation plan
+ignore = [
+    # protobuf vulnerability in libcontainer transitive dependency
+    # Impact: Limited - protobuf is only used for CRIU checkpoint/restore (optional feature)
+    # Mitigation: Input validation at cratons layer, feature rarely used
+    # Tracking: Waiting for libcontainer > 0.5.7 release with updated protobuf
+    { id = "RUSTSEC-2024-0437", reason = "Transitive dep from libcontainer; low impact for cratons use case" },
+]
+
+# Git sources for advisory databases
+git-fetch-with-cli = true
+
+# =============================================================================
+# LICENSES - Licensing Compliance Policy
+# =============================================================================
+#
+# This section enforces that all dependencies use OSI-approved licenses
+# compatible with enterprise use and distribution.
+#
+[licenses]
+# Policy: All crates without recognized licenses are denied.
+# Copyleft licenses require explicit approval.
+
+# Confidence threshold for license detection
+# 0.8 provides good balance between accuracy and coverage
+confidence-threshold = 0.8
+
+# Approved license list with rationale for each
+allow = [
+    # Permissive licenses - fully compatible with commercial use
+    "MIT",                  # Most common, very permissive
+    "Apache-2.0",           # Permissive with patent grant
+    "BSD-2-Clause",         # Simplified BSD, permissive
+    "BSD-3-Clause",         # New BSD, permissive
+    "ISC",                  # Equivalent to MIT, used by OpenSSL
+    "Zlib",                 # Very permissive, used by compression libs
+    "CC0-1.0",              # Public domain dedication
+    "Unlicense",            # Public domain equivalent
+
+    # Weak copyleft - acceptable for linking
+    "MPL-2.0",              # Mozilla Public License, file-level copyleft only
+
+    # Unicode licenses - required for text processing
+    "Unicode-DFS-2016",     # Unicode data files and software
+    "Unicode-3.0",          # Unicode license
+
+    # Data licenses - required for TLS root certificates
+    "CDLA-Permissive-2.0",  # Community Data License Agreement, permissive
+
+    # Special cases
+    "BSL-1.0",              # Boost Software License, permissive
+    "0BSD",                 # Zero-clause BSD, public domain equivalent
+]
+
+# Exceptions for specific crates with alternative licenses or missing licenses
+exceptions = [
+    # rust-criu: GPL-2.0 but only used for Linux checkpoint/restore feature (optional)
+    { name = "rust-criu", allow = ["GPL-2.0"] },
+]
+
+# Private crates - not subject to licensing checks
+[licenses.private]
+ignore = false
+registries = []
+
+# =============================================================================
+# BANS - Dependency Restriction Policy
+# =============================================================================
+#
+# This section controls which crates and versions are allowed in the
+# dependency tree.
+#
+[bans]
+# WARN on multiple versions of the same crate
+# Rationale: Multiple versions increase binary size and maintenance burden
+multiple-versions = "warn"
+
+# ALLOW workspace dependencies (inherited via workspace = true)
+# Note: This allows workspace inheritance which appears as wildcards
+wildcards = "allow"
+
+# Highlight all duplicated dependencies in output
+highlight = "all"
+
+# Prefer workspace dependencies over duplicates
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+# Explicitly banned crates
+# Add crates here that should NEVER be used
+deny = [
+    # Example entries:
+    # { name = "openssl", reason = "Use rustls instead for memory safety" },
+    # { name = "native-tls", reason = "Use rustls for consistent cross-platform TLS" },
+]
+
+# Skip specific version combinations that are known acceptable
+# Use sparingly - document why each skip is acceptable
+skip = [
+    # Example: { name = "syn", version = "1.0" }  # Required by proc-macro crates
+]
+
+# Skip entire dependency trees for vendored dependencies
+skip-tree = [
+    # Example: { name = "windows-sys" }  # Vendored Windows bindings
+]
+
+# Note: Build script policies are not enforced for this project.
+# In high-security environments, consider auditing build scripts manually.
+# [bans.build]
+# allow-build-scripts = [...]
+
+# =============================================================================
+# SOURCES - Supply Chain Policy
+# =============================================================================
+#
+# This section controls where dependencies can be fetched from,
+# preventing supply chain attacks via malicious registries.
+#
+[sources]
+# DENY unknown registries
+# Rationale: Only use trusted package registries
+unknown-registry = "deny"
+
+# DENY git dependencies in production
+# Rationale: Git deps are harder to audit and reproduce
+unknown-git = "deny"
+
+# Allowed registries
+allow-registry = [
+    "https://github.com/rust-lang/crates.io-index",
+]
+
+# Allowed git sources (should be empty for production)
+# Only add entries during development/testing
+allow-git = [
+    # Example: "https://github.com/example/fork"  # Temporary fork for bug fix
+]
+
+# Organizations whose git sources are always allowed
+# Use with caution - enables all repos from these orgs
+[sources.allow-org]
+# Example: github = ["rust-lang"]
+github = []
+gitlab = []
+bitbucket = []
+
+# =============================================================================
+# OUTPUT - Report Configuration
+# =============================================================================
+#
+[output]
+feature-depth = 1

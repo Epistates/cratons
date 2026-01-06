@@ -1,0 +1,59 @@
+[package]
+name = "cratons-benchmarks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Performance benchmarks for Cratons package manager"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+# Internal crates being benchmarked
+cratons-core = { workspace = true }
+cratons-store = { workspace = true }
+cratons-manifest = { workspace = true }
+cratons-lockfile = { workspace = true }
+cratons-resolver = { workspace = true }
+
+# Async runtime for async benchmarks
+tokio = { workspace = true }
+
+# Serialization (for manifest/lockfile generation)
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# Temporary directories for benchmarks
+tempfile = { workspace = true }
+
+# Random data generation
+rand = "0.8"
+
+[dev-dependencies]
+# Criterion benchmarking with async support
+criterion = { version = "0.7", features = ["async_tokio", "html_reports"] }
+
+[[bench]]
+name = "resolver"
+harness = false
+
+[[bench]]
+name = "store"
+harness = false
+
+[[bench]]
+name = "manifest"
+harness = false
+
+[[bench]]
+name = "lockfile"
+harness = false
+
+[lib]
+name = "cratons_benchmarks"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

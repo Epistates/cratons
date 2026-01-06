@@ -1,0 +1,36 @@
+[package]
+name = "cratons-builder"
+description = "Isolated build execution via youki for the Cratons package manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+cratons-core = { workspace = true }
+cratons-store = { workspace = true }
+cratons-manifest = { workspace = true }
+cratons-lockfile = { workspace = true }
+cratons-sandbox = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+oci-spec = { workspace = true }
+tempfile = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+walkdir = { workspace = true }
+chrono = { workspace = true }
+petgraph = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+test-case = { workspace = true }
+
+[lints]
+workspace = true

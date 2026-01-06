@@ -1,0 +1,296 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cratons",
+    "crates/cratons-core",
+    "crates/cratons-store",
+    "crates/cratons-manifest",
+    "crates/cratons-lockfile",
+    "crates/cratons-resolver",
+    "crates/cratons-builder",
+    "crates/cratons-installer",
+    "crates/cratons-workspace",
+    "crates/cratons-security",
+    "crates/cratons-sandbox",
+    "crates/cratons-environment",
+    "crates/cratons-credentials",
+    "crates/cratons-test-fixtures",
+    "crates/cratons-benchmarks",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+keywords = ["package-manager", "dependency", "hermetic", "polyglot", "monorepo"]
+categories = ["development-tools", "command-line-utilities"]
+readme = "README.md"
+description = "Language-agnostic package manager with hermetic builds"
+repository = "https://github.com/rnpm/cratons"
+
+[workspace.dependencies]
+# Internal crates
+cratons-core = { path = "crates/cratons-core" }
+cratons-store = { path = "crates/cratons-store" }
+cratons-manifest = { path = "crates/cratons-manifest" }
+cratons-lockfile = { path = "crates/cratons-lockfile" }
+cratons-resolver = { path = "crates/cratons-resolver" }
+cratons-builder = { path = "crates/cratons-builder" }
+cratons-installer = { path = "crates/cratons-installer" }
+cratons-workspace = { path = "crates/cratons-workspace" }
+cratons-security = { path = "crates/cratons-security" }
+cratons-sandbox = { path = "crates/cratons-sandbox" }
+cratons-environment = { path = "crates/cratons-environment" }
+cratons-credentials = { path = "crates/cratons-credentials" }
+cratons-test-fixtures = { path = "crates/cratons-test-fixtures" }
+
+# youki crates (container runtime) - using published crates.io versions for supply chain security
+libcontainer = "0.5"
+libcgroups = "0.5"
+liboci-cli = "0.5"
+libseccomp = "0.3"
+
+# OCI specification
+oci-spec = "0.8"
+
+# Async runtime
+tokio = { version = "1.41", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+toml_edit = "0.22"
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4.5"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+http = "1.1"
+http-body-util = "0.1"
+bytes = "1.7"
+
+# AWS SDK
+aws-sigv4 = "1.3"
+aws-credential-types = "1.2"
+aws-smithy-runtime-api = "1.7"
+
+# Crypto / Hashing
+sha2 = "0.10"
+blake3 = "1.5"
+hex = "0.4"
+base64 = "0.22"
+hmac = "0.12"
+aes-gcm = "0.10"
+argon2 = { version = "0.5", features = ["std"] }
+# SECURITY: Constant-time comparison to prevent timing attacks on hash verification
+subtle = "2.6"
+
+# Minisign for signature verification (stable, zero-deps)
+minisign-verify = "0.2"
+
+# GPG/OpenPGP signature verification (pure Rust, MIT/Apache-2.0)
+pgp = { version = "0.18", default-features = false }
+
+# Sigstore verification for modern toolchains (Python 3.14+, etc.)
+sigstore = { version = "0.13", default-features = false, features = ["verify", "bundle", "sigstore-trust-root", "rustls-tls"] }
+
+# Credential management
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native", "crypto-rust"] }
+secrecy = { version = "0.10", features = ["serde"] }
+zeroize = { version = "1.8", features = ["derive"] }
+rand = "0.8"
+
+# Filesystem
+walkdir = "2.5"
+tempfile = "3.14"
+fs_extra = "1.3"
+filetime = "0.2"
+same-file = "1.0"
+
+# Compression
+flate2 = "1.0"
+tar = "0.4"
+zstd = "0.13"
+xz2 = "0.1"
+zip = "2.2"
+
+# Semver
+semver = { version = "1.0", features = ["serde"] }
+node-semver = "2.1"
+pep440_rs = "0.7"
+pep508_rs = "0.9"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+miette = { version = "7.4", features = ["fancy"] }
+
+# Logging / Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+indicatif = "0.17"
+console = "0.15"
+owo-colors = "4.1"
+
+# Concurrency
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+rayon = "1.10"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1.11", features = ["v4", "serde"] }
+
+# URL parsing
+url = { version = "2.5", features = ["serde"] }
+urlencoding = "2.1"
+
+# Paths
+pathdiff = "0.2"
+path-absolutize = "3.1"
+dirs = "5.0"
+
+# Graph algorithms
+petgraph = "0.6"
+
+# Glob patterns
+glob = "0.3"
+globset = "0.4"
+
+# Testing
+assert_cmd = "2.0"
+predicates = "3.1"
+insta = { version = "1.41", features = ["json", "toml"] }
+wiremock = "0.6"
+test-case = "3.3"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Lint groups at lower priority so individual lints can override them
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# These come from transitive dependencies (node-semver, sigstore) that haven't
+# updated to thiserror 2.x / getrandom 0.3.x yet. We can't control upstream.
+multiple_crate_versions = "allow"
+
+# Allow these for now - they're style preferences, not correctness issues
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+redundant_closure_for_method_calls = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+significant_drop_tightening = "allow"
+
+# These can be addressed incrementally
+uninlined_format_args = "allow"
+if_not_else = "allow"
+match_same_arms = "allow"
+option_if_let_else = "allow"
+use_self = "allow"
+needless_pass_by_value = "allow"
+ref_option = "allow"
+missing_const_for_fn = "allow"
+unused_self = "allow"
+collapsible_if = "allow"
+large_enum_variant = "allow"
+return_self_not_must_use = "allow"
+struct_field_names = "allow"
+derivable_impls = "allow"
+manual_pattern_char_comparison = "allow"
+format_push_string = "allow"
+unused_async = "allow"
+match_single_binding = "allow"
+wildcard_imports = "allow"
+cognitive_complexity = "allow"
+future_not_send = "allow"
+string_lit_as_bytes = "allow"
+items_after_statements = "allow"
+single_match_else = "allow"
+option_option = "allow"
+redundant_clone = "allow"
+unnecessary_literal_bound = "allow"
+iter_without_into_iter = "allow"
+manual_ok_or = "allow"
+string_add = "allow"
+or_fun_call = "allow"
+redundant_else = "allow"
+should_implement_trait = "allow"
+unnecessary_wraps = "allow"
+cast_sign_loss = "allow"
+cast_possible_truncation = "allow"
+cast_lossless = "allow"
+map_unwrap_or = "allow"
+incompatible_msrv = "allow"
+new_without_default = "allow"
+redundant_closure = "allow"
+assigning_clones = "allow"
+let_and_return = "allow"
+needless_raw_string_hashes = "allow"
+no_effect_replace = "allow"
+for_kv_map = "allow"
+manual_let_else = "allow"
+suboptimal_flops = "allow"
+imprecise_flops = "allow"
+string_slice = "allow"
+needless_match = "allow"
+collapsible_str_replace = "allow"
+only_used_in_recursion = "allow"
+from_iter_instead_of_collect = "allow"
+implicit_clone = "allow"
+collapsible_match = "allow"
+needless_continue = "allow"
+match_wildcard_for_single_variants = "allow"
+manual_string_new = "allow"
+cloned_instead_of_copied = "allow"
+doc_link_with_quotes = "allow"
+trim_split_whitespace = "allow"
+needless_lifetimes = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+to_string_trait_impl = "allow"
+double_ended_iterator_last = "allow"
+unused_peekable = "allow"
+inefficient_to_string = "allow"
+str_to_string = "allow"
+manual_is_variant_and = "allow"
+unnecessary_map_or = "allow"
+struct_excessive_bools = "allow"
+field_reassign_with_default = "allow"
+useless_let_if_seq = "allow"
+default_trait_access = "allow"
+vec_init_then_push = "allow"
+trivially_copy_pass_by_ref = "allow"
+unwrap_or_default = "allow"
+too_many_arguments = "allow"
+needless_borrow = "allow"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.dev.package."*"]
+opt-level = 3

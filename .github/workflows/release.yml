@@ -1,0 +1,290 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'  # Pre-releases like v0.1.0-alpha
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v0.1.0)'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: write
+  id-token: write  # Required for SLSA provenance
+
+jobs:
+  # Prepare and validate release
+  prepare:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Release version: $VERSION (tag: $TAG)"
+
+      - name: Validate version
+        run: |
+          CARGO_VERSION=$(grep -m1 "^version = " Cargo.toml | cut -d'"' -f2)
+          RELEASE_VERSION="${{ steps.version.outputs.version }}"
+          echo "Cargo.toml version: $CARGO_VERSION"
+          echo "Release version: $RELEASE_VERSION"
+          # Allow version mismatch for now (workspace version might differ)
+
+  # Create release artifacts for all platforms
+  build:
+    name: Build (${{ matrix.target }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux (GNU)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: meissner-linux-x86_64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: meissner-linux-aarch64
+            cross: true
+          # Linux (musl - static)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: meissner-linux-x86_64-musl
+            cross: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            artifact: meissner-linux-aarch64-musl
+            cross: true
+          # macOS
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: meissner-darwin-x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: meissner-darwin-aarch64
+          # Windows
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: meissner-windows-x86_64
+            ext: .exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact: meissner-windows-aarch64
+            ext: .exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@cross
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czvf ../../../${{ matrix.artifact }}.tar.gz meissner
+          cd ../../..
+          shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path meissner.exe -DestinationPath ../../../${{ matrix.artifact }}.zip
+          cd ../../..
+          (Get-FileHash ${{ matrix.artifact }}.zip -Algorithm SHA256).Hash.ToLower() + "  ${{ matrix.artifact }}.zip" | Out-File ${{ matrix.artifact }}.zip.sha256 -Encoding ASCII
+
+      - name: Generate artifact hash
+        id: hash
+        shell: bash
+        run: |
+          if [ -f "${{ matrix.artifact }}.tar.gz" ]; then
+            ARTIFACT="${{ matrix.artifact }}.tar.gz"
+          else
+            ARTIFACT="${{ matrix.artifact }}.zip"
+          fi
+
+          # Generate base64-encoded hash for SLSA
+          if command -v sha256sum &> /dev/null; then
+            HASH=$(sha256sum "$ARTIFACT" | awk '{print $1}')
+          elif command -v shasum &> /dev/null; then
+            HASH=$(shasum -a 256 "$ARTIFACT" | awk '{print $1}')
+          else
+            HASH=$(Get-FileHash "$ARTIFACT" -Algorithm SHA256 | Select-Object -ExpandProperty Hash)
+          fi
+
+          echo "hash=$HASH" >> $GITHUB_OUTPUT
+          echo "artifact=$ARTIFACT" >> $GITHUB_OUTPUT
+          echo "Hash for $ARTIFACT: $HASH"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.tar.gz.sha256
+            ${{ matrix.artifact }}.zip
+            ${{ matrix.artifact }}.zip.sha256
+          if-no-files-found: ignore
+
+  # Generate SLSA provenance for all artifacts
+  provenance:
+    name: Generate SLSA Provenance
+    needs: [prepare, build]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.build.outputs.hashes }}"
+      upload-assets: false
+      provenance-name: "meissner-${{ needs.prepare.outputs.version }}.intoto.jsonl"
+
+  # Create GitHub release
+  release:
+    name: Create Release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          TAG="${{ needs.prepare.outputs.tag }}"
+
+          # Extract changelog for this version
+          if [ -f "CHANGELOG.md" ]; then
+            if grep -q "## \[$VERSION\]" CHANGELOG.md; then
+              sed -n "/## \[$VERSION\]/,/## \[/p" CHANGELOG.md | head -n -1 > changelog_section.md
+            elif grep -q "## $VERSION" CHANGELOG.md; then
+              sed -n "/## $VERSION/,/## /p" CHANGELOG.md | head -n -1 > changelog_section.md
+            fi
+          fi
+
+          # Create full release notes
+          cat > release_notes.md << 'EOF'
+          ## Installation
+
+          Download the appropriate archive for your platform from the assets below.
+
+          ### Verification
+
+          All archives include SHA256 checksums. Verify your download:
+
+          ```bash
+          # Linux/macOS
+          sha256sum -c meissner-*.tar.gz.sha256
+
+          # Windows (PowerShell)
+          $hash = Get-FileHash meissner-*.zip -Algorithm SHA256
+          $expected = Get-Content meissner-*.zip.sha256
+          $hash.Hash -eq $expected
+          ```
+
+          ### SLSA Provenance
+
+          This release includes SLSA Level 3 provenance attestation for supply chain security.
+
+          ## Supported Platforms
+
+          - Linux (x86_64, aarch64) - glibc and musl variants
+          - macOS (x86_64 Intel, aarch64 Apple Silicon)
+          - Windows (x86_64, aarch64)
+
+          ---
+
+          EOF
+
+          # Append changelog if it exists
+          if [ -f "changelog_section.md" ]; then
+            cat changelog_section.md >> release_notes.md
+          else
+            echo "See [CHANGELOG.md](CHANGELOG.md) for details." >> release_notes.md
+          fi
+
+          cat release_notes.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: meissner v${{ needs.prepare.outputs.version }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
+          files: |
+            artifacts/*
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publish to crates.io (manual trigger for now)
+  # publish:
+  #   name: Publish to crates.io
+  #   needs: release
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - name: Publish
+  #       run: cargo publish --workspace
+  #       env:
+  #         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

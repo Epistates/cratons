@@ -1,0 +1,30 @@
+[package]
+name = "cratons-manifest"
+description = "Manifest parsing and validation for the Cratons package manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+cratons-core = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+thiserror = { workspace = true }
+semver = { workspace = true }
+node-semver = { workspace = true }
+pep440_rs = { workspace = true }
+pep508_rs = { workspace = true }
+url = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+test-case = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,45 @@
+[package]
+name = "cratons-credentials"
+version = "0.1.0"
+edition = "2024"
+description = "Secure credential management for Cratons package manager"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cratons-rs/cratons"
+keywords = ["credentials", "keychain", "secrets", "security"]
+categories = ["authentication", "config"]
+readme = "README.md"
+
+[dependencies]
+# Cross-platform keychain access
+keyring = "3"
+
+# Secret management with automatic zeroization
+secrecy = { version = "0.10", features = ["serde"] }
+zeroize = { version = "1", features = ["derive"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime (includes async-aware Mutex via sync feature)
+tokio = { version = "1", features = ["fs", "sync"] }
+async-trait = "0.1"
+
+# Error handling
+thiserror = "2"
+
+# Encryption for file-based storage
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+base64 = "0.22"
+
+# Tracing
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

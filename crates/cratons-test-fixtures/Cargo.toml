@@ -1,0 +1,63 @@
+[package]
+name = "cratons-test-fixtures"
+description = "Test fixtures and utilities for the Cratons package manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+# Internal crates
+cratons-core = { workspace = true }
+cratons-manifest = { workspace = true }
+cratons-lockfile = { workspace = true }
+cratons-resolver = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# Version types
+semver = { workspace = true }
+node-semver = { workspace = true }
+pep440_rs = { workspace = true }
+
+# HTTP/Async
+tokio = { workspace = true, features = ["macros", "rt"] }
+reqwest = { workspace = true }
+
+# Test dependencies (available as regular deps since this is a test-only crate)
+tempfile = { workspace = true }
+wiremock = { workspace = true }
+
+# Property-based testing
+proptest = "1.5"
+proptest-derive = "0.5"
+
+# Fake data generation
+fake = { version = "3.0", features = ["derive", "chrono", "semver", "uuid", "http"] }
+rand = "0.8"
+
+# Date/time
+chrono = { workspace = true }
+
+# Hashing
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+
+# URL
+url = { workspace = true }
+
+# Graph algorithms
+petgraph = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,353 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Faster builds with sccache
+  SCCACHE_GHA_ENABLED: true
+  RUSTC_WRAPPER: sccache
+
+# Cancel in-progress runs for the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Quick checks that fail fast
+  check:
+    name: Quick Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: check
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (all targets)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Check documentation
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # Main test matrix
+  test:
+    name: Test (${{ matrix.os }}, ${{ matrix.rust }})
+    needs: check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        rust: [stable, beta]
+        exclude:
+          # Skip beta on Windows to save CI time
+          - os: windows-latest
+            rust: beta
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+        if: matrix.os != 'windows-latest'
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-${{ matrix.os }}
+
+      - name: Build
+        run: cargo build --workspace --verbose
+
+      - name: Run tests
+        run: cargo test --workspace --verbose
+
+      - name: Run tests (release mode)
+        run: cargo test --workspace --release --verbose
+        if: matrix.rust == 'stable'
+
+  # Code coverage (Linux only)
+  coverage:
+    name: Code Coverage
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+
+      - name: Generate coverage report
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # Security audit
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Run security audit
+        run: cargo audit
+
+  # Supply chain security and compliance (cargo-deny)
+  deny:
+    name: Supply Chain Security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      # Run each check independently for better error visibility
+      # This allows us to see exactly which policy is violated
+
+      - name: Check advisories (security vulnerabilities)
+        run: cargo deny check advisories
+
+      - name: Check licenses (license compliance)
+        run: cargo deny check licenses
+
+      - name: Check bans (banned/duplicate crates)
+        run: cargo deny check bans
+
+      - name: Check sources (supply chain)
+        run: cargo deny check sources
+
+      # Comprehensive check (all-in-one, for completeness)
+      - name: Comprehensive dependency check
+        run: cargo deny check
+
+  # Minimum Supported Rust Version
+  msrv:
+    name: MSRV (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.85
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv
+
+      - name: Check MSRV
+        run: cargo check --workspace
+
+  # Integration tests with network access
+  integration:
+    name: Integration Tests (${{ matrix.ecosystem }})
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ecosystem: [npm, pypi, crates]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: integration-${{ matrix.ecosystem }}
+
+      - name: Run integration tests for ${{ matrix.ecosystem }}
+        run: |
+          cargo test --package meissner-resolver --test registry_integration \
+            --test wiremock_integration -- --ignored --nocapture \
+            --test-threads=1
+        timeout-minutes: 15
+        env:
+          RUST_LOG: debug
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results-${{ matrix.ecosystem }}
+          path: |
+            target/debug/deps/*.log
+            target/tmp/
+
+  # Benchmark regression testing
+  benchmark:
+    name: Benchmark Regression
+    needs: check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: benchmark
+
+      - name: Run benchmarks
+        run: |
+          cargo bench --package meissner-benchmarks --bench resolver -- --save-baseline main
+          cargo bench --package meissner-benchmarks --bench store -- --save-baseline main
+          cargo bench --package meissner-benchmarks --bench lockfile -- --save-baseline main
+          cargo bench --package meissner-benchmarks --bench manifest -- --save-baseline main
+
+      - name: Store benchmark results
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: 'cargo'
+          output-file-path: target/criterion/output.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          alert-threshold: '110%'
+          comment-on-alert: true
+          fail-on-alert: true
+          alert-comment-cc-users: '@rnpm/maintainers'
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            target/criterion/
+          retention-days: 30
+
+  # Enhanced security scanning with Trivy and SARIF output
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: security
+
+      - name: Run cargo-audit with SARIF output
+        id: cargo-audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit --json | cargo audit --output-format sarif > audit-results.sarif
+        continue-on-error: true
+
+      - name: Upload cargo-audit SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() && steps.cargo-audit.outcome == 'success'
+        with:
+          sarif_file: audit-results.sarif
+          category: cargo-audit
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          scanners: 'vuln,secret,config'
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+      - name: Trivy artifact scan (fail on critical)
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL'
+
+  # All checks passed
+  ci-success:
+    name: CI Success
+    needs: [check, test, coverage, audit, deny, msrv, integration, security-scan]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [[ "${{ needs.check.result }}" != "success" ]] ||
+             [[ "${{ needs.test.result }}" != "success" ]] ||
+             [[ "${{ needs.coverage.result }}" != "success" ]] ||
+             [[ "${{ needs.audit.result }}" != "success" ]] ||
+             [[ "${{ needs.deny.result }}" != "success" ]] ||
+             [[ "${{ needs.msrv.result }}" != "success" ]] ||
+             [[ "${{ needs.integration.result }}" != "success" ]] ||
+             [[ "${{ needs.security-scan.result }}" != "success" ]]; then
+            echo "Some jobs failed"
+            exit 1
+          fi
+          echo "All CI checks passed!"

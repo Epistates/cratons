@@ -1,0 +1,29 @@
+[package]
+name = "cratons-workspace"
+description = "Workspace and monorepo support for the Cratons package manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+cratons-core = { workspace = true }
+cratons-manifest = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+walkdir = { workspace = true }
+petgraph = { workspace = true }
+glob = { workspace = true }
+# L-08: Removed unused globset dependency
+tracing = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+test-case = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

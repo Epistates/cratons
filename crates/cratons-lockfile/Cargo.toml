@@ -1,0 +1,36 @@
+[package]
+name = "cratons-lockfile"
+description = "Lockfile format and operations for the Cratons package manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+cratons-core = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
+tracing = { workspace = true }
+fs2 = "0.4"
+tempfile = { workspace = true }
+# Cryptographic signatures for lockfile integrity
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
+base64 = "0.22"
+# Constant-time comparison for signature verification
+subtle = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+test-case = { workspace = true }
+
+[lints]
+workspace = true

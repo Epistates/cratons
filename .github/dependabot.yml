@@ -1,0 +1,123 @@
+# Dependabot configuration for automated dependency updates
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+
+updates:
+  # Cargo dependencies (Rust)
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 10
+    groups:
+      # Group production dependencies
+      production-dependencies:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "libfuzzer-sys"
+          - "criterion"
+          - "insta"
+          - "assert_cmd"
+          - "predicates"
+          - "test-case"
+          - "wiremock"
+        update-types:
+          - "minor"
+          - "patch"
+      # Group development/test dependencies separately
+      development-dependencies:
+        applies-to: version-updates
+        patterns:
+          - "libfuzzer-sys"
+          - "criterion"
+          - "insta"
+          - "assert_cmd"
+          - "predicates"
+          - "test-case"
+          - "wiremock"
+        update-types:
+          - "minor"
+          - "patch"
+      # Group ecosystem-specific dependencies
+      aws-dependencies:
+        applies-to: version-updates
+        patterns:
+          - "aws-*"
+        update-types:
+          - "minor"
+          - "patch"
+      tokio-ecosystem:
+        applies-to: version-updates
+        patterns:
+          - "tokio*"
+          - "futures"
+          - "async-trait"
+        update-types:
+          - "minor"
+          - "patch"
+      serde-ecosystem:
+        applies-to: version-updates
+        patterns:
+          - "serde*"
+          - "toml*"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    reviewers:
+      - "rnpm/maintainers"
+    assignees:
+      - "rnpm/maintainers"
+    # Ignore major version updates for stability
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    # Allow pre-release updates for specific crates
+    allow:
+      - dependency-type: "all"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    reviewers:
+      - "rnpm/maintainers"
+
+  # Docker (if applicable in future)
+  # - package-ecosystem: "docker"
+  #   directory: "/"
+  #   schedule:
+  #     interval: "weekly"
+  #   labels:
+  #     - "dependencies"
+  #     - "docker"

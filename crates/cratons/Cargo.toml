@@ -1,0 +1,60 @@
+[package]
+name = "cratons"
+description = "A language-agnostic package manager with hermetic builds - inspired by the Cratons effect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "cts"
+path = "src/main.rs"
+
+[dependencies]
+cratons-core = { workspace = true }
+cratons-store = { workspace = true }
+cratons-manifest = { workspace = true }
+cratons-lockfile = { workspace = true }
+cratons-resolver = { workspace = true }
+cratons-builder = { workspace = true }
+cratons-installer = { workspace = true }
+cratons-workspace = { workspace = true }
+cratons-security = { workspace = true }
+cratons-environment = { workspace = true }
+
+clap = { workspace = true }
+clap_complete = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+miette = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+indicatif = { workspace = true }
+console = { workspace = true }
+owo-colors = { workspace = true }
+dirs = { workspace = true }
+semver = { workspace = true }
+tempfile = { workspace = true }
+toml = { workspace = true }
+
+# OpenTelemetry for SOTA Observability
+opentelemetry = "0.21"
+opentelemetry_sdk = { version = "0.21", features = ["rt-tokio"] }
+opentelemetry-otlp = "0.14"
+tracing-opentelemetry = "0.22"
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+insta = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

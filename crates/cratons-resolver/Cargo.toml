@@ -1,0 +1,43 @@
+[package]
+name = "cratons-resolver"
+description = "Dependency resolution (MVS) and registry clients for the Cratons package manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+cratons-core = { workspace = true }
+cratons-manifest = { workspace = true }
+cratons-lockfile = { workspace = true }
+cratons-store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+pubgrub = "0.2"
+pep440_rs = "0.7"
+semver = { workspace = true }
+petgraph = { workspace = true }
+tracing = { workspace = true }
+urlencoding = { workspace = true }
+pep508_rs = { workspace = true }
+node-semver = { workspace = true }
+governor = "0.10"
+
+[dev-dependencies]
+insta = { workspace = true }
+test-case = { workspace = true }
+wiremock = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+toml = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

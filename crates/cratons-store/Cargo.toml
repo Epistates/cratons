@@ -1,0 +1,66 @@
+[package]
+name = "cratons-store"
+description = "Content-addressable storage for the Cratons package manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+cratons-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+walkdir = { workspace = true }
+tempfile = { workspace = true }
+fs_extra = { workspace = true }
+filetime = { workspace = true }
+same-file = { workspace = true }
+parking_lot = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+toml = { workspace = true }
+fs2 = "0.4"
+
+# Remote cache
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+reqwest-middleware = "0.3"
+reqwest-retry = "0.5"
+url = { workspace = true }
+tar = { workspace = true }
+zstd = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+
+# Archive extraction for toolchain download
+flate2 = { workspace = true }
+xz2 = { workspace = true }
+zip = { workspace = true }
+
+# Signature verification
+minisign-verify = { workspace = true }
+pgp = { workspace = true }
+sigstore = { workspace = true }
+
+# AWS SDK for S3 signing
+aws-sigv4 = { workspace = true }
+aws-credential-types = { workspace = true }
+aws-smithy-runtime-api = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+test-case = { workspace = true }
+
+[lints]
+workspace = true

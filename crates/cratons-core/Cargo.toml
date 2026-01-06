@@ -1,0 +1,37 @@
+[package]
+name = "cratons-core"
+description = "Core types, traits, and utilities for the Cratons package manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+semver = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+walkdir = { workspace = true }
+node-semver = { workspace = true }
+pep440_rs = { workspace = true }
+tracing = { workspace = true }
+# SECURITY: Constant-time comparison to prevent timing attacks on hash verification
+subtle = { workspace = true }
+# SECURITY: Input validation for package names and paths
+regex = "1.11"
+
+[dev-dependencies]
+insta = { workspace = true }
+test-case = { workspace = true }
+
+[lints]
+workspace = true
