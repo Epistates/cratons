@@ -9,7 +9,7 @@
 //! to prevent SSRF attacks. See [`cratons_core::validation`] for details.
 
 use async_trait::async_trait;
-use cratons_core::{Ecosystem, CratonsError, Result, validate_package_name, validate_version};
+use cratons_core::{Ecosystem, CratonsError, Result, validate_package_name, validate_version, normalize_checksum_format};
 use serde::Deserialize;
 use std::collections::HashMap;
 use tracing::{debug, instrument};
@@ -323,7 +323,7 @@ impl RegistryClient for CratesIoClient {
             name: index_line.name,
             version: index_line.version,
             dist_url: self.crate_download_url(name, version),
-            integrity: format!("sha256-{}", index_line.checksum),
+            integrity: normalize_checksum_format(&format!("sha256-{}", index_line.checksum))?,
             dependencies,
             optional_dependencies,
             peer_dependencies: HashMap::new(),

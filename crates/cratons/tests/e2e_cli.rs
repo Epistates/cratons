@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 /// Helper to run cratons CLI commands
 fn cratons_cmd() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_mei"))
+    Command::new(env!("CARGO_BIN_EXE_cts"))
 }
 
 /// Helper to create a test project directory

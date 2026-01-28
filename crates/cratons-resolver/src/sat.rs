@@ -133,20 +133,21 @@ impl SatResolver {
         Self { registry }
     }
 
-    /// Resolve dependencies using `PubGrub`.
+    /// Resolve dependencies using `PubGrub` for multiple ecosystems simultaneously.
     ///
     /// # Errors
     ///
-    /// Returns an error if resolution fails or if there is a system error (e.g. joining threads).
-    pub async fn resolve(
+    /// Returns an error if resolution fails or if there is a system error.
+    pub async fn resolve_multi(
         &self,
-        ecosystem: Ecosystem,
-        root_deps: Vec<(String, String)>,
-        strategy: ResolutionStrategy,
-    ) -> Result<HashMap<String, String>> {
+        root_deps: Vec<(String, String, Ecosystem)>,
+        strategies: HashMap<Ecosystem, ResolutionStrategy>,
+    ) -> Result<HashMap<(String, Ecosystem), String>> {
+        // Use Npm as the "host" ecosystem for root, but it doesn't matter
+        // as long as the name is unique.
         let root_package = SatPackage {
             name: "__root__".to_string(),
-            ecosystem,
+            ecosystem: Ecosystem::Npm,
         };
 
         let root_version = SatVersion::Virtual(1);
@@ -157,11 +158,10 @@ impl SatResolver {
         let solution = tokio::task::spawn_blocking(move || {
             let provider = SatDependencyProvider {
                 registry,
-                ecosystem,
                 root_deps,
                 root_package: root_package.clone(),
                 handle,
-                strategy,
+                strategies,
             };
 
             resolve(&provider, root_package, root_version)
@@ -176,7 +176,7 @@ impl SatResolver {
             if pkg.name == "__root__" {
                 continue;
             }
-            result.insert(pkg.name, ver.to_string());
+            result.insert((pkg.name, pkg.ecosystem), ver.to_string());
         }
 
         Ok(result)
@@ -187,16 +187,14 @@ impl SatResolver {
 
 struct SatDependencyProvider {
     registry: Arc<Registry>,
-    ecosystem: Ecosystem,
-    root_deps: Vec<(String, String)>,
+    root_deps: Vec<(String, String, Ecosystem)>,
     root_package: SatPackage,
     handle: Handle,
-    strategy: ResolutionStrategy,
+    strategies: HashMap<Ecosystem, ResolutionStrategy>,
 }
 
 impl DependencyProvider<SatPackage, SatVersion> for SatDependencyProvider {
     // Select the best version from the potential packages.
-    // PubGrub 0.2.1 signature:
     fn choose_package_version<T: Borrow<SatPackage>, U: Borrow<Range<SatVersion>>>(
         &self,
         mut potential_packages: impl Iterator<Item = (T, U)>,
@@ -238,8 +236,14 @@ impl DependencyProvider<SatPackage, SatVersion> for SatDependencyProvider {
         // Sort versions
         parsed_versions.sort();
 
-        // Apply strategy
-        match self.strategy {
+        // Apply ecosystem-specific strategy
+        let strategy = self
+            .strategies
+            .get(&pkg.ecosystem)
+            .copied()
+            .unwrap_or(ResolutionStrategy::MaxSatisfying);
+
+        match strategy {
             ResolutionStrategy::MaxSatisfying => {
                 let best_version = parsed_versions
                     .into_iter()
@@ -263,12 +267,12 @@ impl DependencyProvider<SatPackage, SatVersion> for SatDependencyProvider {
 
         // Root dependencies
         if package == &self.root_package {
-            for (name, req) in &self.root_deps {
+            for (name, req, ecosystem) in &self.root_deps {
                 let dep_pkg = SatPackage {
                     name: name.clone(),
-                    ecosystem: self.ecosystem,
+                    ecosystem: *ecosystem,
                 };
-                let range = parse_range(self.ecosystem, req);
+                let range = parse_range(*ecosystem, req);
                 deps.insert(dep_pkg, range);
             }
             return Ok(Dependencies::Known(deps));

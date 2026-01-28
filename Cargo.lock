@@ -1235,6 +1235,7 @@ dependencies = [
 name = "cratons-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "blake3",
  "chrono",
  "hex",
@@ -1318,6 +1319,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "tar",
  "tempfile",

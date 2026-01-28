@@ -11,10 +11,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-pub mod download;
-pub mod extract;
-pub mod link;
-pub mod scripts;
+mod download;
+mod download_diagnostics;
+mod extract;
+mod link;
+mod scripts;
+
 
 use cratons_core::{Ecosystem, CratonsError, Result};
 use cratons_environment::Environment;

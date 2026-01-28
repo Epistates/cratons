@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, info};
+use crate::download_diagnostics::DownloadDiagnostics;
 
 /// Downloads packages from registries with parallel fetch support.
 pub struct PackageDownloader {
@@ -43,6 +44,8 @@ impl PackageDownloader {
             CratonsError::Network(format!("Failed to download {}: {}", pkg.name, e))
         })?;
 
+        let mut diag = DownloadDiagnostics::new(pkg.source.clone(), &response);
+
         if !response.status().is_success() {
             return Err(CratonsError::Network(format!(
                 "Failed to download {}: HTTP {}",
@@ -57,6 +60,13 @@ impl PackageDownloader {
             .map_err(|e| CratonsError::Network(format!("Failed to read response: {}", e)))?;
 
         let bytes_downloaded = bytes.len() as u64;
+        diag.actual_bytes = bytes_downloaded;
+
+        // Validate content (checks for truncation, empty bodies, etc.)
+        if let Err(e) = diag.validate_content(&bytes) {
+            tracing::error!("Download diagnostics: {:#?}", diag);
+            return Err(e);
+        }
 
         // TOCTOU Protection: Verify integrity on in-memory bytes BEFORE storing
         // This ensures the verified content is exactly what gets stored
@@ -162,36 +172,58 @@ impl PackageDownloader {
     }
 
     /// Verify the downloaded content integrity.
+    ///
+    /// Supports SHA1, SHA256, and SHA512 in base64 format.
+    /// All integrity hashes should be normalized to base64 at registry fetch time.
     fn verify_download_integrity(&self, pkg: &LockedPackage, bytes: &[u8]) -> Result<()> {
         use base64::{Engine, engine::general_purpose::STANDARD};
+        use sha1::Sha1;
         use sha2::{Digest, Sha256, Sha512};
 
-        // Parse integrity format: "sha256-base64hash" or "sha512-base64hash"
-        let (expected_hash, is_sha512) = if let Some(hash) = pkg.integrity.strip_prefix("sha256-") {
-            (hash, false)
+        /// Hash algorithm detected from integrity string
+        enum HashAlgo {
+            Sha1,
+            Sha256,
+            Sha512,
+        }
+
+        // Parse integrity format: "algorithm-base64hash"
+        let (expected_hash, algo) = if let Some(hash) = pkg.integrity.strip_prefix("sha1-") {
+            (hash, HashAlgo::Sha1)
+        } else if let Some(hash) = pkg.integrity.strip_prefix("sha256-") {
+            (hash, HashAlgo::Sha256)
         } else if let Some(hash) = pkg.integrity.strip_prefix("sha512-") {
-            (hash, true)
+            (hash, HashAlgo::Sha512)
         } else {
-            // Unknown format, skip verification
+            // Unknown format, skip verification with warning
             debug!(
-                "Unknown integrity format for {}, skipping verification",
-                pkg.name
+                "Unknown integrity format for {} ({}), skipping verification",
+                pkg.name, pkg.integrity
             );
             return Ok(());
         };
 
-        // Compute actual hash
-        let actual_hash = if is_sha512 {
-            let mut hasher = Sha512::new();
-            hasher.update(bytes);
-            STANDARD.encode(hasher.finalize())
-        } else {
-            let mut hasher = Sha256::new();
-            hasher.update(bytes);
-            STANDARD.encode(hasher.finalize())
+        // Compute actual hash based on algorithm
+        let actual_hash = match algo {
+            HashAlgo::Sha1 => {
+                let mut hasher = Sha1::new();
+                hasher.update(bytes);
+                STANDARD.encode(hasher.finalize())
+            }
+            HashAlgo::Sha256 => {
+                let mut hasher = Sha256::new();
+                hasher.update(bytes);
+                STANDARD.encode(hasher.finalize())
+            }
+            HashAlgo::Sha512 => {
+                let mut hasher = Sha512::new();
+                hasher.update(bytes);
+                STANDARD.encode(hasher.finalize())
+            }
         };
 
-        // Compare
+        // Compare (constant-time comparison would be better but not critical here
+        // since we're comparing computed vs expected, not secrets)
         if actual_hash != expected_hash {
             return Err(CratonsError::ChecksumMismatch {
                 package: pkg.name.clone(),

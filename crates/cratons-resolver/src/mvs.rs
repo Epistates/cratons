@@ -61,37 +61,47 @@ impl Resolver {
         let mut resolution = Resolution::new();
         let mut graph = DependencyGraph::new();
 
-        // 1. Hybrid Strategy: SAT Solving for NPM/PyPI
-        for ecosystem in [Ecosystem::Npm, Ecosystem::PyPi] {
+        // 1. Hybrid Strategy: Unified SAT Solving for NPM/PyPI
+        let sat_ecosystems = [Ecosystem::Npm, Ecosystem::PyPi];
+        let mut sat_roots = Vec::new();
+        let mut strategies = HashMap::new();
+
+        for ecosystem in sat_ecosystems {
             let deps = manifest.dependencies.for_ecosystem(ecosystem);
             if !deps.is_empty() {
-                info!("Using SAT solver for {}", ecosystem);
-                let root_deps = deps
-                    .iter()
-                    .map(|(name, dep)| (name.clone(), dep.version().unwrap_or("*").to_string()))
-                    .collect();
-
-                let sat_resolver = SatResolver::new(self.registry.clone());
-
                 let strategy = manifest
                     .resolution
                     .get(&ecosystem)
                     .copied()
                     .unwrap_or(ResolutionStrategy::MaxSatisfying);
+                strategies.insert(ecosystem, strategy);
 
-                match sat_resolver.resolve(ecosystem, root_deps, strategy).await {
-                    Ok(solution) => {
-                        for (name, version) in solution {
-                            let _idx = graph.add_package(&name, ecosystem);
-                            graph.set_resolved_version(&name, ecosystem, version);
-                        }
+                info!("Using SAT solver for {}", ecosystem);
+                for (name, dep) in deps {
+                    sat_roots.push((
+                        name.clone(),
+                        dep.version().unwrap_or("*").to_string(),
+                        ecosystem,
+                    ));
+                }
+            }
+        }
+
+        if !sat_roots.is_empty() {
+            let sat_resolver = SatResolver::new(self.registry.clone());
+
+            match sat_resolver.resolve_multi(sat_roots, strategies).await {
+                Ok(solution) => {
+                    for ((name, ecosystem), version) in solution {
+                        let _idx = graph.add_package(&name, ecosystem);
+                        graph.set_resolved_version(&name, ecosystem, version);
                     }
-                    Err(e) => {
-                        return Err(CratonsError::Config(format!(
-                            "SAT resolution failed for {}: {}",
-                            ecosystem, e
-                        )));
-                    }
+                }
+                Err(e) => {
+                    return Err(CratonsError::Config(format!(
+                        "SAT resolution failed: {}",
+                        e
+                    )));
                 }
             }
         }
@@ -769,8 +779,8 @@ mod tests {
     #[test]
     fn test_resolver_creation() {
         let resolver = Resolver::new(false);
-        // Resolver starts empty before with_defaults() is called
-        assert!(resolver.registry().is_empty());
+        // Resolver starts with defaults
+        assert!(!resolver.registry().is_empty());
     }
 
     #[test]

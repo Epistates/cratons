@@ -9,10 +9,10 @@
 //! to prevent SSRF attacks. See [`cratons_core::validation`] for details.
 
 use async_trait::async_trait;
-use cratons_core::{Ecosystem, CratonsError, Result, validate_package_name, validate_version};
+use cratons_core::{Ecosystem, CratonsError, Result, validate_package_name, validate_version, normalize_checksum_format};
 use serde::Deserialize;
 use std::collections::HashMap;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 use super::{PackageMetadata, PeerDependencyMeta, RegistryClient};
 
@@ -237,10 +237,25 @@ impl RegistryClient for NpmClient {
             })?;
 
         // Use integrity if available, fall back to sha1 shasum
+        // Normalize to base64 format for consistent verification
         let integrity = if !npm_meta.dist.integrity.is_empty() {
-            npm_meta.dist.integrity.clone()
+            // npm integrity is usually already sha512-base64, but normalize anyway
+            match normalize_checksum_format(&npm_meta.dist.integrity) {
+                Ok(normalized) => normalized,
+                Err(e) => {
+                    warn!("Failed to normalize npm integrity for {}@{}: {}", name, version, e);
+                    npm_meta.dist.integrity.clone()
+                }
+            }
         } else if !npm_meta.dist.shasum.is_empty() {
-            format!("sha1-{}", npm_meta.dist.shasum)
+            // shasum is sha1 in hex format
+            match normalize_checksum_format(&format!("sha1-{}", npm_meta.dist.shasum)) {
+                Ok(normalized) => normalized,
+                Err(e) => {
+                    warn!("Failed to normalize npm shasum for {}@{}: {}", name, version, e);
+                    format!("sha1-{}", npm_meta.dist.shasum)
+                }
+            }
         } else {
             String::new()
         };
