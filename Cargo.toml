@@ -73,7 +73,7 @@ clap_complete = "4.5"
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 http = "1.1"
 http-body-util = "0.1"
-bytes = "1.7"
+bytes = "1.11"
 
 # AWS SDK
 aws-sigv4 = "1.3"
@@ -82,7 +82,7 @@ aws-smithy-runtime-api = "1.7"
 
 # Crypto / Hashing
 sha2 = "0.10"
-blake3 = "1.5"
+blake3 = "1.8"
 hex = "0.4"
 base64 = "0.22"
 hmac = "0.12"
@@ -108,13 +108,13 @@ rand = "0.8"
 
 # Filesystem
 walkdir = "2.5"
-tempfile = "3.14"
+tempfile = "3.26"
 fs_extra = "1.3"
 filetime = "0.2"
 same-file = "1.0"
 
 # Compression
-flate2 = "1.0"
+flate2 = "1.1"
 tar = "0.4"
 zstd = "0.13"
 xz2 = "0.1"
@@ -136,7 +136,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 indicatif = "0.17"
 console = "0.15"
-owo-colors = "4.1"
+owo-colors = "4.3"
 
 # Concurrency
 parking_lot = "0.12"
@@ -147,7 +147,7 @@ rayon = "1.10"
 chrono = { version = "0.4", features = ["serde"] }
 
 # UUID
-uuid = { version = "1.11", features = ["v4", "serde"] }
+uuid = { version = "1.21", features = ["v4", "serde"] }
 
 # URL parsing
 url = { version = "2.5", features = ["serde"] }
