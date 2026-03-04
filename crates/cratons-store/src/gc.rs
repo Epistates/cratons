@@ -1,13 +1,25 @@
 //! Garbage collection for the store.
+//!
+//! # Security
+//!
+//! The garbage collector uses file locking to prevent race conditions where
+//! artifacts could be deleted while in use. This is achieved through:
+//! - Exclusive lock acquisition before any deletion
+//! - Lock file per-artifact to coordinate concurrent access
+//! - Graceful handling of lock failures (skip instead of corrupt)
 
 use cratons_core::Result;
+use fs2::FileExt;
 use std::collections::HashSet;
-use std::fs;
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tracing::{debug, info, warn};
 
 use crate::Store;
+
+/// Lock file name used within artifact directories
+const LOCK_FILE_NAME: &str = ".cratons-gc-lock";
 
 /// Statistics from a garbage collection run.
 #[derive(Debug, Clone, Default)]
@@ -62,17 +74,59 @@ impl<'a> GarbageCollector<'a> {
                     match self.check_artifact_age(&entry.path(), cutoff) {
                         Ok(should_remove) => {
                             if should_remove {
-                                let size = dir_size(&entry.path());
-                                if let Err(e) = fs::remove_dir_all(entry.path()) {
-                                    stats.errors.push(format!(
-                                        "Failed to remove artifact {}: {}",
-                                        entry.path().display(),
-                                        e
-                                    ));
-                                } else {
-                                    stats.artifacts_removed += 1;
-                                    stats.bytes_freed += size;
-                                    debug!("Removed artifact: {}", entry.path().display());
+                                // SECURITY: Acquire exclusive lock before deletion to prevent
+                                // race conditions where another process might be using this artifact
+                                match self.try_lock_for_deletion(&entry.path()) {
+                                    Ok(Some(_lock_guard)) => {
+                                        // Re-check age after acquiring lock (double-check pattern)
+                                        // This prevents TOCTOU where artifact was accessed between
+                                        // our initial check and acquiring the lock
+                                        match self.check_artifact_age(&entry.path(), cutoff) {
+                                            Ok(true) => {
+                                                let size = dir_size(&entry.path());
+                                                if let Err(e) = fs::remove_dir_all(entry.path()) {
+                                                    stats.errors.push(format!(
+                                                        "Failed to remove artifact {}: {}",
+                                                        entry.path().display(),
+                                                        e
+                                                    ));
+                                                } else {
+                                                    stats.artifacts_removed += 1;
+                                                    stats.bytes_freed += size;
+                                                    debug!("Removed artifact: {}", entry.path().display());
+                                                }
+                                            }
+                                            Ok(false) => {
+                                                // Artifact was accessed since our initial check, skip
+                                                debug!(
+                                                    "Artifact {} was accessed during GC, skipping",
+                                                    entry.path().display()
+                                                );
+                                            }
+                                            Err(e) => {
+                                                stats.errors.push(format!(
+                                                    "Failed to re-check artifact {}: {}",
+                                                    entry.path().display(),
+                                                    e
+                                                ));
+                                            }
+                                        }
+                                        // Lock is released when _lock_guard is dropped
+                                    }
+                                    Ok(None) => {
+                                        // Could not acquire lock - artifact is in use
+                                        debug!(
+                                            "Artifact {} is locked, skipping GC",
+                                            entry.path().display()
+                                        );
+                                    }
+                                    Err(e) => {
+                                        stats.errors.push(format!(
+                                            "Failed to lock artifact {}: {}",
+                                            entry.path().display(),
+                                            e
+                                        ));
+                                    }
                                 }
                             } else {
                                 // Collect referenced file hashes from this artifact
@@ -222,6 +276,48 @@ impl<'a> GarbageCollector<'a> {
             path.display()
         );
         Ok(())
+    }
+
+    /// Try to acquire an exclusive lock for deletion.
+    ///
+    /// Returns `Ok(Some(file))` if the lock was acquired (caller must keep file alive).
+    /// Returns `Ok(None)` if the artifact is in use (lock could not be acquired).
+    /// Returns `Err` on I/O errors.
+    ///
+    /// # Security
+    ///
+    /// This prevents race conditions where an artifact could be deleted while
+    /// another process is reading or using it. The lock file is created inside
+    /// the artifact directory and must be held for the duration of any deletion.
+    fn try_lock_for_deletion(&self, artifact_path: &Path) -> Result<Option<File>> {
+        let lock_path = artifact_path.join(LOCK_FILE_NAME);
+
+        // Create or open the lock file
+        let lock_file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+
+        // Try to acquire exclusive lock (non-blocking)
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => {
+                debug!("Acquired GC lock for {}", artifact_path.display());
+                Ok(Some(lock_file))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Lock is held by another process
+                debug!(
+                    "Could not acquire GC lock for {} (in use)",
+                    artifact_path.display()
+                );
+                Ok(None)
+            }
+            Err(e) => {
+                // Other I/O error
+                Err(cratons_core::CratonsError::Io(e))
+            }
+        }
     }
 
     /// Remove empty directories.

@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use cratons_core::{Ecosystem, CratonsError, Result, validate_package_name, validate_version, normalize_checksum_format};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tracing::{debug, instrument, warn};
 
 use super::{PackageMetadata, PeerDependencyMeta, RegistryClient};
@@ -75,11 +75,11 @@ impl NpmClient {
 struct NpmPackument {
     name: String,
     #[serde(default)]
-    versions: HashMap<String, NpmVersionMetadata>,
+    versions: BTreeMap<String, NpmVersionMetadata>,
     #[serde(rename = "dist-tags", default)]
-    dist_tags: HashMap<String, String>,
+    dist_tags: BTreeMap<String, String>,
     #[serde(default)]
-    time: HashMap<String, String>,
+    time: BTreeMap<String, String>,
 }
 
 /// npm version-specific metadata
@@ -88,16 +88,16 @@ struct NpmVersionMetadata {
     name: String,
     version: String,
     #[serde(default)]
-    dependencies: HashMap<String, String>,
+    dependencies: BTreeMap<String, String>,
     #[serde(rename = "devDependencies", default)]
-    dev_dependencies: HashMap<String, String>,
+    dev_dependencies: BTreeMap<String, String>,
     #[serde(rename = "peerDependencies", default)]
-    peer_dependencies: HashMap<String, String>,
+    peer_dependencies: BTreeMap<String, String>,
     /// npm v7+ peerDependenciesMeta - marks which peer deps are optional
     #[serde(rename = "peerDependenciesMeta", default)]
-    peer_dependencies_meta: HashMap<String, NpmPeerDepMeta>,
+    peer_dependencies_meta: BTreeMap<String, NpmPeerDepMeta>,
     #[serde(rename = "optionalDependencies", default)]
-    optional_dependencies: HashMap<String, String>,
+    optional_dependencies: BTreeMap<String, String>,
     /// Bundled dependencies - these are included in the tarball
     /// npm supports both spellings: bundledDependencies and bundleDependencies
     #[serde(rename = "bundledDependencies", alias = "bundleDependencies", default)]
@@ -290,7 +290,7 @@ impl RegistryClient for NpmClient {
             dev_dependencies: npm_meta.dev_dependencies,
             bundled_dependencies: npm_meta.bundled_dependencies,
             features: Vec::new(),
-            feature_definitions: HashMap::new(),
+            feature_definitions: BTreeMap::new(),
         })
     }
 

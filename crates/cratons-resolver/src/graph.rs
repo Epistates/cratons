@@ -4,7 +4,7 @@ use cratons_core::{Ecosystem, VersionReq};
 use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// A node in the dependency graph.
 #[derive(Debug, Clone)]
@@ -59,7 +59,7 @@ pub struct DependencyEdge {
 #[derive(Debug, Clone)]
 pub struct DependencyGraph {
     graph: DiGraph<PackageNode, DependencyEdge>,
-    index_map: HashMap<(Ecosystem, String), NodeIndex>,
+    index_map: BTreeMap<(Ecosystem, String), NodeIndex>,
 }
 
 impl DependencyGraph {
@@ -68,7 +68,7 @@ impl DependencyGraph {
     pub fn new() -> Self {
         Self {
             graph: DiGraph::new(),
-            index_map: HashMap::new(),
+            index_map: BTreeMap::new(),
         }
     }
 

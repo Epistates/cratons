@@ -4,9 +4,11 @@ use fs2::FileExt;
 use cratons_core::{ContentHash, HashAlgorithm, Hasher, CratonsError, Result};
 use parking_lot::RwLock;
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::{debug, trace, warn};
+use uuid::Uuid;
 
 /// Content-addressable store for individual files.
 ///
@@ -41,13 +43,28 @@ impl ContentAddressableStore {
     }
 
     /// Store content and return its hash.
+    ///
+    /// This method is designed to be safe against TOCTOU (Time-Of-Check-Time-Of-Use)
+    /// race conditions. It uses:
+    /// - Unique temp file names (PID + UUID) to prevent collisions
+    /// - Atomic file creation with O_EXCL to detect races
+    /// - Atomic rename for final placement
     pub fn store(&self, content: &[u8]) -> Result<ContentHash> {
         let hash = Hasher::hash_bytes(HashAlgorithm::Blake3, content);
         let path = self.hash_path(&hash);
 
-        // Check if already stored
+        // Fast path: check memory cache first (no filesystem access)
+        {
+            let known = self.known_hashes.read();
+            if known.contains(&hash.value) {
+                trace!("CAS memory cache hit: {}", hash.short());
+                return Ok(hash);
+            }
+        }
+
+        // Check if already stored on filesystem
         if path.exists() {
-            trace!("CAS hit: {}", hash.short());
+            trace!("CAS filesystem hit: {}", hash.short());
             self.known_hashes.write().insert(hash.value.clone());
             return Ok(hash);
         }
@@ -57,32 +74,72 @@ impl ContentAddressableStore {
             fs::create_dir_all(parent)?;
         }
 
-        // Write atomically via temp file with exclusive lock
-        let temp_path = path.with_extension("tmp");
+        // SECURITY: Use unique temp file name to prevent TOCTOU attacks
+        // The combination of PID + UUID ensures uniqueness across processes and threads
+        let temp_path = path.with_extension(format!(
+            "tmp.{}.{}",
+            std::process::id(),
+            Uuid::new_v4().simple()
+        ));
 
-        {
-            let file = fs::File::create(&temp_path)?;
+        // SECURITY: Use create_new (O_EXCL) for atomic file creation
+        // This fails if the file already exists, preventing race conditions
+        let result = (|| -> Result<()> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true) // O_EXCL: atomic create, fails if exists
+                .open(&temp_path)
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        // Another process created this exact temp file (extremely unlikely with UUID)
+                        CratonsError::Io(std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            format!("Temp file collision: {}", temp_path.display()),
+                        ))
+                    } else {
+                        CratonsError::Io(e)
+                    }
+                })?;
 
-            // Acquire exclusive lock
-            if let Err(e) = file.lock_exclusive() {
-                // If locking fails, someone else might be writing.
-                // In a robust implementation, we might wait or check if target exists.
-                // For now, we propagate the error as it shouldn't happen often.
-                // We clean up the temp file if we can't lock it.
+            // Acquire exclusive lock for additional safety
+            file.lock_exclusive().inspect_err(|_| {
+                // Clean up on lock failure
                 let _ = fs::remove_file(&temp_path);
-                return Err(e.into());
-            }
+            })?;
 
             // Write content
-            fs::write(&temp_path, content)?;
+            file.write_all(content)?;
+            file.sync_all()?; // Ensure data is flushed to disk before rename
 
-            // Rename to final path
-            // Note: rename is atomic on POSIX, but replacing an existing file
-            // (if a race happened) is also fine as content is content-addressed.
-            fs::rename(&temp_path, &path)?;
+            // Lock released when file is dropped
+            drop(file);
 
-            // Unlock is automatic when file is dropped
+            // Atomic rename to final path
+            // On POSIX, rename is atomic. If another process raced us and already
+            // created the final file, that's fine - content is content-addressed,
+            // so the content is identical.
+            match fs::rename(&temp_path, &path) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    // Clean up temp file on rename failure
+                    let _ = fs::remove_file(&temp_path);
+                    // If final file now exists (another process won the race), that's OK
+                    if path.exists() {
+                        trace!("CAS race: another process stored {} first", hash.short());
+                        Ok(())
+                    } else {
+                        Err(CratonsError::Io(e))
+                    }
+                }
+            }
+        })();
+
+        // Clean up temp file if anything went wrong
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
         }
+
+        result?;
 
         debug!("Stored {} bytes at {}", content.len(), hash.short());
         self.known_hashes.write().insert(hash.value.clone());

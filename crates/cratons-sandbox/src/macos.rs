@@ -39,13 +39,19 @@ use crate::{IsolationLevel, Sandbox};
 
 /// Binaries that are always allowed to execute in the sandbox.
 /// These are essential for build systems to function.
+///
+/// # Security Note
+///
+/// This list is intentionally minimal. Only binaries strictly required for
+/// builds are included. Network tools (curl, wget) are conditionally added
+/// based on network access settings.
 const ALLOWED_SYSTEM_BINARIES: &[&str] = &[
-    // Shells
+    // Shells (required for script execution)
     "/bin/sh",
     "/bin/bash",
     "/bin/zsh",
     "/usr/bin/env",
-    // Core utilities
+    // Core utilities (file manipulation)
     "/bin/ls",
     "/bin/cat",
     "/bin/cp",
@@ -86,13 +92,13 @@ const ALLOWED_SYSTEM_BINARIES: &[&str] = &[
     "/usr/bin/bzip2",
     "/usr/bin/unzip",
     "/usr/bin/zip",
-    // Development tools
+    // Development tools (minimal set)
     "/usr/bin/make",
     "/usr/bin/git",
     "/usr/bin/which",
     "/usr/bin/file",
     "/usr/bin/install",
-    // Xcode command line tools
+    // Xcode command line tools (Apple-signed, trusted)
     "/usr/bin/xcrun",
     "/usr/bin/xcodebuild",
     "/usr/bin/xcode-select",
@@ -101,21 +107,36 @@ const ALLOWED_SYSTEM_BINARIES: &[&str] = &[
     "/usr/bin/swift",
     "/usr/bin/swiftc",
     "/usr/bin/llvm-cov",
-    // Network tools (only when network is allowed)
-    "/usr/bin/curl",
 ];
 
-/// Directories where executable discovery is allowed.
-/// Binaries in these paths can be executed via path search.
+/// Network tools that are only allowed when network access is enabled.
+/// These are excluded by default to prevent data exfiltration.
+const NETWORK_BINARIES: &[&str] = &[
+    "/usr/bin/curl",
+    "/usr/bin/nc",
+    "/usr/bin/nslookup",
+    "/usr/bin/dig",
+    "/usr/bin/host",
+];
+
+/// Minimal set of system directories where execution is allowed.
+///
+/// # Security Note
+///
+/// We intentionally do NOT include:
+/// - `/usr/local/bin` - User-installed binaries, could contain malware
+/// - `/opt/homebrew/bin` - Homebrew binaries, not vetted
+/// - `/opt/homebrew/Cellar` - All homebrew packages, too permissive
+///
+/// For builds that need additional toolchains, the toolchain path should
+/// be explicitly added to the sandbox config's allowed paths.
 const ALLOWED_EXEC_PATHS: &[&str] = &[
+    // System binaries only - these are Apple-signed and trusted
     "/bin",
     "/usr/bin",
-    "/usr/local/bin",
-    "/opt/homebrew/bin",
+    // Xcode toolchain - Apple-signed, required for native builds
     "/Applications/Xcode.app/Contents/Developer",
-    // Common toolchain locations
-    "/usr/local/Cellar",
-    "/opt/homebrew/Cellar",
+    "/Library/Developer/CommandLineTools",
 ];
 
 /// Environment variables that should never be passed to sandboxed processes.
@@ -219,9 +240,41 @@ impl MacOsSandbox {
             profile.push_str(&format!("(allow process-exec (literal \"{binary}\"))\n"));
         }
 
+        // SECURITY: Only allow network tools when network access is enabled
+        // This prevents data exfiltration attempts via curl/nc/etc
+        let network_enabled = !matches!(&config.network, NetworkAccess::None);
+        if network_enabled {
+            for binary in NETWORK_BINARIES {
+                profile.push_str(&format!("(allow process-exec (literal \"{binary}\"))\n"));
+            }
+            debug!("Network enabled: allowing network binaries");
+        } else {
+            debug!("Network disabled: blocking network binaries (curl, nc, etc.)");
+        }
+
         // Allow execution from approved directories (for toolchains installed there)
+        // NOTE: This is intentionally restricted to Apple-signed paths only
         for path in ALLOWED_EXEC_PATHS {
             profile.push_str(&format!("(allow process-exec (subpath \"{path}\"))\n"));
+        }
+
+        // Allow execution from additional toolchain paths if specified in config
+        for mount in &config.ro_mounts {
+            // If a read-only mount looks like a toolchain directory, allow execution
+            let mount_path = mount.source.to_string_lossy();
+            if mount_path.contains("toolchain")
+                || mount_path.contains("sdk")
+                || mount_path.contains("node")
+                || mount_path.contains("python")
+                || mount_path.contains("rust")
+                || mount_path.contains("go")
+            {
+                profile.push_str(&format!(
+                    "(allow process-exec (subpath \"{}\"))\n",
+                    mount_path
+                ));
+                debug!("Allowing execution from toolchain mount: {}", mount_path);
+            }
         }
 
         // Allow execution from the workdir (for project scripts)

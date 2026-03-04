@@ -10,7 +10,7 @@ use std::str::FromStr;
 use crate::error::{CratonsError, Result};
 
 /// Supported package ecosystems.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Ecosystem {
     /// npm (Node.js packages)

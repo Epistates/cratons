@@ -19,7 +19,7 @@
 //! ```
 
 use cratons_core::{Ecosystem, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use tracing::{debug, info};
 
 /// Feature dependency request from a package.
@@ -77,7 +77,7 @@ pub struct CrateFeatures {
     pub version: String,
     /// Features and what they enable (other features or optional deps)
     /// e.g., "full" => ["derive", "parsing", "printing"]
-    pub features: HashMap<String, Vec<String>>,
+    pub features: BTreeMap<String, Vec<String>>,
     /// Optional dependencies (feature name equals dep name)
     pub optional_deps: HashSet<String>,
     /// Default feature contents
@@ -89,7 +89,7 @@ impl CrateFeatures {
     pub fn from_index_data(
         name: String,
         version: String,
-        features: HashMap<String, Vec<String>>,
+        features: BTreeMap<String, Vec<String>>,
         optional_deps: Vec<String>,
     ) -> Self {
         let default_features = features.get("default").cloned().unwrap_or_default();
@@ -146,11 +146,11 @@ impl CrateFeatures {
 #[derive(Debug, Default)]
 pub struct FeatureUnifier {
     /// Feature requests per crate: (name, ecosystem) -> Vec<FeatureRequest>
-    requests: HashMap<(String, Ecosystem), Vec<FeatureRequest>>,
+    requests: BTreeMap<(String, Ecosystem), Vec<FeatureRequest>>,
     /// Crate feature definitions: (name, version, ecosystem) -> CrateFeatures
-    crate_features: HashMap<(String, String, Ecosystem), CrateFeatures>,
+    crate_features: BTreeMap<(String, String, Ecosystem), CrateFeatures>,
     /// Resolved unified features per crate: (name, ecosystem) -> UnifiedFeatures
-    unified: HashMap<(String, Ecosystem), UnifiedFeatures>,
+    unified: BTreeMap<(String, Ecosystem), UnifiedFeatures>,
 }
 
 impl FeatureUnifier {
@@ -187,7 +187,7 @@ impl FeatureUnifier {
     ///
     /// This processes all feature requests and computes the final feature set
     /// for each crate in the dependency graph.
-    pub fn unify(&mut self, versions: &HashMap<(String, Ecosystem), String>) -> Result<()> {
+    pub fn unify(&mut self, versions: &BTreeMap<(String, Ecosystem), String>) -> Result<()> {
         info!("Unifying features for {} crates", self.requests.len());
 
         for ((name, ecosystem), requests) in &self.requests {
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn test_feature_expansion_simple() {
-        let mut features = HashMap::new();
+        let mut features = BTreeMap::new();
         features.insert(
             "full".to_string(),
             vec!["derive".to_string(), "parsing".to_string()],
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_feature_expansion_with_optional_dep() {
-        let mut features = HashMap::new();
+        let mut features = BTreeMap::new();
         features.insert("default".to_string(), vec!["std".to_string()]);
         features.insert("std".to_string(), vec![]);
         features.insert("derive".to_string(), vec!["dep:serde_derive".to_string()]);
@@ -357,7 +357,7 @@ mod tests {
             false,
         );
 
-        let mut versions = HashMap::new();
+        let mut versions = BTreeMap::new();
         versions.insert(
             ("serde".to_string(), Ecosystem::Crates),
             "1.0.0".to_string(),
@@ -393,7 +393,7 @@ mod tests {
             false,
         );
 
-        let mut versions = HashMap::new();
+        let mut versions = BTreeMap::new();
         versions.insert(
             ("serde".to_string(), Ecosystem::Crates),
             "1.0.0".to_string(),
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_crate_features_from_index() {
-        let mut features = HashMap::new();
+        let mut features = BTreeMap::new();
         features.insert("default".to_string(), vec!["std".to_string()]);
         features.insert("std".to_string(), vec![]);
         features.insert("alloc".to_string(), vec![]);

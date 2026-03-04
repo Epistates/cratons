@@ -87,14 +87,14 @@ async fn test_resolver_with_wiremock() {
         version: "1.0.0".to_string(),
         dist_url: "http://example.com/dist".to_string(),
         integrity: "sha256-123".to_string(),
-        dependencies: std::collections::HashMap::new(),
-        optional_dependencies: std::collections::HashMap::new(),
-        peer_dependencies: std::collections::HashMap::new(),
-        peer_dependencies_meta: std::collections::HashMap::new(),
-        dev_dependencies: std::collections::HashMap::new(),
+        dependencies: std::collections::BTreeMap::new(),
+        optional_dependencies: std::collections::BTreeMap::new(),
+        peer_dependencies: std::collections::BTreeMap::new(),
+        peer_dependencies_meta: std::collections::BTreeMap::new(),
+        dev_dependencies: std::collections::BTreeMap::new(),
         bundled_dependencies: vec![],
         features: vec![],
-        feature_definitions: std::collections::HashMap::new(),
+        feature_definitions: std::collections::BTreeMap::new(),
     };
 
     Mock::given(method("GET"))
@@ -150,14 +150,14 @@ async fn test_resolution_strategy_override() {
         version: "1.0.0".to_string(),
         dist_url: "http://example.com/dist".to_string(),
         integrity: "sha256-123".to_string(),
-        dependencies: std::collections::HashMap::new(),
-        optional_dependencies: std::collections::HashMap::new(),
-        peer_dependencies: std::collections::HashMap::new(),
-        peer_dependencies_meta: std::collections::HashMap::new(),
-        dev_dependencies: std::collections::HashMap::new(),
+        dependencies: std::collections::BTreeMap::new(),
+        optional_dependencies: std::collections::BTreeMap::new(),
+        peer_dependencies: std::collections::BTreeMap::new(),
+        peer_dependencies_meta: std::collections::BTreeMap::new(),
+        dev_dependencies: std::collections::BTreeMap::new(),
         bundled_dependencies: vec![],
         features: vec![],
-        feature_definitions: std::collections::HashMap::new(),
+        feature_definitions: std::collections::BTreeMap::new(),
     };
 
     Mock::given(method("GET"))

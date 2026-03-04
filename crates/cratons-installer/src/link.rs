@@ -1,6 +1,6 @@
 //! Package linking from CAS to project directories.
 
-use cratons_core::{Ecosystem, CratonsError, Result};
+use cratons_core::{CratonsError, Ecosystem, Result};
 use cratons_store::Store;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,6 +20,11 @@ impl<'a> PackageLinker<'a> {
     /// Create a new linker.
     pub fn new(store: &'a Store, strategy: LinkStrategy) -> Self {
         Self { store, strategy }
+    }
+
+    /// Get the configured link strategy.
+    pub fn strategy(&self) -> LinkStrategy {
+        self.strategy
     }
 
     /// Link a package to the project's install directory.
@@ -70,20 +75,7 @@ impl<'a> PackageLinker<'a> {
         install_dir: &Path,
         package_name: &str,
     ) -> Result<PathBuf> {
-        let dest = if package_name.starts_with('@') {
-            // Scoped package: @scope/name -> node_modules/@scope/name
-            let parts: Vec<&str> = package_name.splitn(2, '/').collect();
-            if parts.len() == 2 {
-                let scope_dir = install_dir.join(parts[0]);
-                fs::create_dir_all(&scope_dir)?;
-                scope_dir.join(parts[1])
-            } else {
-                install_dir.join(package_name)
-            }
-        } else {
-            install_dir.join(package_name)
-        };
-
+        let dest = npm_package_dest(install_dir, package_name)?;
         self.create_link(source, &dest)?;
         debug!("Linked npm package {} to {}", package_name, dest.display());
         Ok(dest)
@@ -203,134 +195,165 @@ impl<'a> PackageLinker<'a> {
 
     /// Create a link using the configured strategy.
     fn create_link(&self, source: &Path, dest: &Path) -> Result<()> {
-        // Remove existing destination if present
-        if dest.exists() || dest.is_symlink() {
-            if dest.is_dir() && !dest.is_symlink() {
-                fs::remove_dir_all(dest)?;
-            } else {
-                fs::remove_file(dest)?;
-            }
-        }
-
-        // Create parent directories
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        match self.strategy {
-            LinkStrategy::Symlink => {
-                #[cfg(unix)]
-                {
-                    std::os::unix::fs::symlink(source, dest)?;
-                }
-                #[cfg(windows)]
-                {
-                    if source.is_dir() {
-                        // Try symlink first (requires Developer Mode or Admin)
-                        if std::os::windows::fs::symlink_dir(source, dest).is_err() {
-                            // Fallback to Junction (no admin needed for dirs)
-                            // This provides a much faster and more correct behavior than copying
-                            // 'junction' crate handles the reparse point magic
-                            debug!("Symlink failed, attempting junction for {}", dest.display());
-                            if let Err(e) = junction::create(source, dest) {
-                                debug!("Junction failed ({}), falling back to copy", e);
-                                self.copy_directory(source, dest)?;
-                            }
-                        }
-                    } else {
-                        if std::os::windows::fs::symlink_file(source, dest).is_err() {
-                            // Fallback to hard link
-                            if fs::hard_link(source, dest).is_err() {
-                                // Fallback to copy
-                                debug!(
-                                    "Symlink/Hardlink failed, falling back to copy for {}",
-                                    dest.display()
-                                );
-                                fs::copy(source, dest)?;
-                            }
-                        }
-                    }
-                }
-            }
-            LinkStrategy::HardLink => {
-                if source.is_dir() {
-                    // Hard links don't work for directories, recurse
-                    self.hardlink_directory(source, dest)?;
-                } else {
-                    fs::hard_link(source, dest)?;
-                }
-            }
-            LinkStrategy::Copy => {
-                if source.is_dir() {
-                    self.copy_directory(source, dest)?;
-                } else {
-                    fs::copy(source, dest)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Recursively hard-link a directory.
-    fn hardlink_directory(&self, source: &Path, dest: &Path) -> Result<()> {
-        fs::create_dir_all(dest)?;
-
-        for entry in WalkDir::new(source).min_depth(1) {
-            let entry = entry?;
-            let relative = entry.path().strip_prefix(source).map_err(|e| {
-                CratonsError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    e.to_string(),
-                ))
-            })?;
-            let dest_path = dest.join(relative);
-
-            if entry.file_type().is_dir() {
-                fs::create_dir_all(&dest_path)?;
-            } else if entry.file_type().is_file() {
-                if let Some(parent) = dest_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                // Try hard link, fall back to copy on cross-device
-                if fs::hard_link(entry.path(), &dest_path).is_err() {
-                    fs::copy(entry.path(), &dest_path)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Recursively copy a directory.
-    fn copy_directory(&self, source: &Path, dest: &Path) -> Result<()> {
-        fs::create_dir_all(dest)?;
-
-        for entry in WalkDir::new(source).min_depth(1) {
-            let entry = entry?;
-            let relative = entry.path().strip_prefix(source).map_err(|e| {
-                CratonsError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    e.to_string(),
-                ))
-            })?;
-            let dest_path = dest.join(relative);
-
-            if entry.file_type().is_dir() {
-                fs::create_dir_all(&dest_path)?;
-            } else if entry.file_type().is_file() {
-                if let Some(parent) = dest_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::copy(entry.path(), &dest_path)?;
-            }
-        }
-
-        Ok(())
+        create_link_with_strategy(source, dest, self.strategy)
     }
 }
 
+/// Compute the destination path for an npm package in node_modules.
+///
+/// Handles scoped packages (@scope/name) by creating the scope directory.
+fn npm_package_dest(node_modules: &Path, package_name: &str) -> Result<PathBuf> {
+    if package_name.starts_with('@') {
+        // Scoped package: @scope/name -> node_modules/@scope/name
+        let parts: Vec<&str> = package_name.splitn(2, '/').collect();
+        if parts.len() == 2 {
+            let scope_dir = node_modules.join(parts[0]);
+            fs::create_dir_all(&scope_dir)?;
+            Ok(scope_dir.join(parts[1]))
+        } else {
+            Ok(node_modules.join(package_name))
+        }
+    } else {
+        Ok(node_modules.join(package_name))
+    }
+}
+
+/// Create a link from source to dest using the specified strategy.
+///
+/// This is the canonical implementation of linking with fallback behavior.
+fn create_link_with_strategy(source: &Path, dest: &Path, strategy: LinkStrategy) -> Result<()> {
+    // Remove existing destination if present
+    if dest.exists() || dest.is_symlink() {
+        if dest.is_dir() && !dest.is_symlink() {
+            fs::remove_dir_all(dest)?;
+        } else {
+            fs::remove_file(dest)?;
+        }
+    }
+
+    // Create parent directories
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    match strategy {
+        LinkStrategy::Symlink => {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(source, dest)?;
+            }
+            #[cfg(windows)]
+            {
+                if source.is_dir() {
+                    // Try symlink first (requires Developer Mode or Admin)
+                    if std::os::windows::fs::symlink_dir(source, dest).is_err() {
+                        // Fallback to Junction (no admin needed for dirs)
+                        debug!("Symlink failed, attempting junction for {}", dest.display());
+                        if let Err(e) = junction::create(source, dest) {
+                            debug!("Junction failed ({}), falling back to copy", e);
+                            copy_directory(source, dest)?;
+                        }
+                    }
+                } else if std::os::windows::fs::symlink_file(source, dest).is_err() {
+                    // Fallback to hard link
+                    if fs::hard_link(source, dest).is_err() {
+                        // Fallback to copy
+                        debug!(
+                            "Symlink/Hardlink failed, falling back to copy for {}",
+                            dest.display()
+                        );
+                        fs::copy(source, dest)?;
+                    }
+                }
+            }
+        }
+        LinkStrategy::HardLink => {
+            if source.is_dir() {
+                // Hard links don't work for directories, recurse
+                hardlink_directory(source, dest)?;
+            } else {
+                fs::hard_link(source, dest)?;
+            }
+        }
+        LinkStrategy::Copy => {
+            if source.is_dir() {
+                copy_directory(source, dest)?;
+            } else {
+                fs::copy(source, dest)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Recursively hard-link a directory.
+fn hardlink_directory(source: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest)?;
+
+    for entry in WalkDir::new(source).min_depth(1) {
+        let entry = entry?;
+        let relative = entry.path().strip_prefix(source).map_err(|e| {
+            CratonsError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                e.to_string(),
+            ))
+        })?;
+        let dest_path = dest.join(relative);
+
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&dest_path)?;
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            // Try hard link, fall back to copy on cross-device
+            if fs::hard_link(entry.path(), &dest_path).is_err() {
+                fs::copy(entry.path(), &dest_path)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Recursively copy a directory.
+///
+/// Uses WalkDir for robust traversal including symlink handling.
+fn copy_directory(source: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest)?;
+
+    for entry in WalkDir::new(source).min_depth(1) {
+        let entry = entry?;
+        let relative = entry.path().strip_prefix(source).map_err(|e| {
+            CratonsError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                e.to_string(),
+            ))
+        })?;
+        let dest_path = dest.join(relative);
+
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&dest_path)?;
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(entry.path(), &dest_path)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Create the appropriate node_modules structure for npm packages.
+///
+/// This is an alternative bulk installation API for scenarios like:
+/// - pnpm-style symlink farms with content-addressable deduplication
+/// - Batch linking of pre-resolved package sets
+/// - Custom installation strategies
+///
+/// For standard per-package linking, use `PackageLinker::link_package()` instead.
 pub fn create_node_modules_structure(
     packages: &[(String, PathBuf)],
     node_modules: &Path,
@@ -339,57 +362,11 @@ pub fn create_node_modules_structure(
     fs::create_dir_all(node_modules)?;
 
     for (name, source) in packages {
-        let dest = if name.starts_with('@') {
-            // Scoped package
-            let parts: Vec<&str> = name.splitn(2, '/').collect();
-            if parts.len() == 2 {
-                let scope_dir = node_modules.join(parts[0]);
-                fs::create_dir_all(&scope_dir)?;
-                scope_dir.join(parts[1])
-            } else {
-                node_modules.join(name)
-            }
-        } else {
-            node_modules.join(name)
-        };
-
-        // Create link based on strategy
-        match strategy {
-            LinkStrategy::Symlink => {
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(source, &dest)?;
-                #[cfg(windows)]
-                {
-                    if std::os::windows::fs::symlink_dir(source, &dest).is_err() {
-                        // Fallback to copy for node_modules on Windows
-                        copy_dir_all(source, &dest)?;
-                    }
-                }
-            }
-            LinkStrategy::HardLink | LinkStrategy::Copy => {
-                // Copy for hard link (directories) and copy strategy
-                copy_dir_all(source, &dest)?;
-            }
-        }
+        let dest = npm_package_dest(node_modules, name)?;
+        create_link_with_strategy(source, &dest, strategy)?;
+        debug!("Linked {} to {}", name, dest.display());
     }
 
-    Ok(())
-}
-
-/// Helper to copy a directory recursively.
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let dest_path = dst.join(entry.file_name());
-
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dest_path)?;
-        } else {
-            fs::copy(entry.path(), &dest_path)?;
-        }
-    }
     Ok(())
 }
 
@@ -401,7 +378,8 @@ mod tests {
     #[test]
     fn test_copy_directory() {
         let src = tempdir().unwrap();
-        let dst = tempdir().unwrap();
+        let dst_dir = tempdir().unwrap();
+        let dst = dst_dir.path().join("copied");
 
         // Create source structure
         fs::write(src.path().join("file.txt"), "content").unwrap();
@@ -409,10 +387,70 @@ mod tests {
         fs::write(src.path().join("subdir/nested.txt"), "nested").unwrap();
 
         // Copy
-        copy_dir_all(src.path(), dst.path()).unwrap();
+        copy_directory(src.path(), &dst).unwrap();
 
         // Verify
-        assert!(dst.path().join("file.txt").exists());
-        assert!(dst.path().join("subdir/nested.txt").exists());
+        assert!(dst.join("file.txt").exists());
+        assert!(dst.join("subdir/nested.txt").exists());
+        assert_eq!(fs::read_to_string(dst.join("file.txt")).unwrap(), "content");
+    }
+
+    #[test]
+    fn test_npm_package_dest_regular() {
+        let node_modules = PathBuf::from("/project/node_modules");
+        let dest = npm_package_dest(&node_modules, "lodash").unwrap();
+        assert_eq!(dest, PathBuf::from("/project/node_modules/lodash"));
+    }
+
+    #[test]
+    fn test_npm_package_dest_scoped() {
+        let temp = tempdir().unwrap();
+        let node_modules = temp.path().join("node_modules");
+        fs::create_dir_all(&node_modules).unwrap();
+
+        let dest = npm_package_dest(&node_modules, "@types/node").unwrap();
+        assert_eq!(dest, node_modules.join("@types").join("node"));
+        assert!(node_modules.join("@types").exists());
+    }
+
+    #[test]
+    fn test_create_node_modules_structure() {
+        let temp = tempdir().unwrap();
+        let node_modules = temp.path().join("node_modules");
+
+        // Create source packages
+        let pkg1_src = temp.path().join("pkg1");
+        let pkg2_src = temp.path().join("pkg2");
+        fs::create_dir_all(&pkg1_src).unwrap();
+        fs::create_dir_all(&pkg2_src).unwrap();
+        fs::write(pkg1_src.join("index.js"), "module.exports = 1").unwrap();
+        fs::write(pkg2_src.join("index.js"), "module.exports = 2").unwrap();
+
+        let packages = vec![
+            ("lodash".to_string(), pkg1_src),
+            ("express".to_string(), pkg2_src),
+        ];
+
+        create_node_modules_structure(&packages, &node_modules, LinkStrategy::Copy).unwrap();
+
+        assert!(node_modules.join("lodash/index.js").exists());
+        assert!(node_modules.join("express/index.js").exists());
+    }
+
+    #[test]
+    fn test_create_node_modules_structure_scoped() {
+        let temp = tempdir().unwrap();
+        let node_modules = temp.path().join("node_modules");
+
+        // Create source package
+        let pkg_src = temp.path().join("types-node");
+        fs::create_dir_all(&pkg_src).unwrap();
+        fs::write(pkg_src.join("index.d.ts"), "declare module 'node'").unwrap();
+
+        let packages = vec![("@types/node".to_string(), pkg_src)];
+
+        create_node_modules_structure(&packages, &node_modules, LinkStrategy::Copy).unwrap();
+
+        assert!(node_modules.join("@types/node/index.d.ts").exists());
     }
 }

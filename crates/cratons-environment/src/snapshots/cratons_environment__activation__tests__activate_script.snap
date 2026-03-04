@@ -1,0 +1,63 @@
+---
+source: crates/cratons-environment/src/activation.rs
+expression: activate_content
+---
+# Cratons environment activation script
+# Source this file to activate the environment: source .cratons/activate
+
+_cratons_deactivate() {
+    if [ -n "${_CRATONS_OLD_PATH:-}" ]; then
+        PATH="${_CRATONS_OLD_PATH}"
+        export PATH
+        unset _CRATONS_OLD_PATH
+    fi
+
+    if [ -n "${_CRATONS_OLD_PS1:-}" ]; then
+        PS1="${_CRATONS_OLD_PS1}"
+        export PS1
+        unset _CRATONS_OLD_PS1
+    fi
+
+    unset CRATONS_ENV
+    unset CRATONS_ENV_ROOT
+    unset VIRTUAL_ENV
+    unset PYTHONNOUSERSITE
+    unset NODE_PATH
+    unset CARGO_HOME
+    unset GOPATH
+
+    if [ ! "${1:-}" = "nondestructive" ]; then
+        unset -f _cratons_deactivate
+    fi
+}
+
+# Deactivate any existing environment
+_cratons_deactivate nondestructive
+
+# Save old PATH
+_CRATONS_OLD_PATH="${PATH}"
+
+# Set new PATH
+PATH="/tmp/project/.cratons/env/python/bin:${PATH}"
+export PATH
+
+# Set environment marker
+CRATONS_ENV="1"
+CRATONS_ENV_ROOT="/tmp/project/.cratons/env"
+export CRATONS_ENV CRATONS_ENV_ROOT
+\n# Python environment
+VIRTUAL_ENV="/tmp/project/.cratons/env/python"
+PYTHONNOUSERSITE="1"
+export VIRTUAL_ENV PYTHONNOUSERSITE
+\n# Modify prompt
+if [ -z "${CRATONS_ENV_DISABLE_PROMPT:-}" ]; then
+    _CRATONS_OLD_PS1="${PS1:-}"
+    PS1="(mei) ${PS1:-}"
+    export PS1
+fi
+
+# Provide deactivate command
+alias deactivate='_cratons_deactivate'
+
+echo "Cratons environment activated"
+echo "  Run 'deactivate' to exit"

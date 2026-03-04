@@ -31,8 +31,8 @@ use tracing::{debug, info, warn};
 
 pub use download::PackageDownloader;
 pub use extract::PackageExtractor;
-pub use link::PackageLinker;
-pub use scripts::PostInstallRunner;
+pub use link::{PackageLinker, create_node_modules_structure};
+pub use scripts::{PackageScripts, PostInstallRunner};
 
 /// Configuration for the installer.
 #[derive(Debug, Clone)]

@@ -6,7 +6,7 @@ use cratons_core::{
 };
 use cratons_lockfile::{LOCKFILE_NAME, Lockfile};
 use cratons_manifest::Manifest;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -64,7 +64,7 @@ impl Resolver {
         // 1. Hybrid Strategy: Unified SAT Solving for NPM/PyPI
         let sat_ecosystems = [Ecosystem::Npm, Ecosystem::PyPi];
         let mut sat_roots = Vec::new();
-        let mut strategies = HashMap::new();
+        let mut strategies = BTreeMap::new();
 
         for ecosystem in sat_ecosystems {
             let deps = manifest.dependencies.for_ecosystem(ecosystem);
@@ -111,15 +111,15 @@ impl Resolver {
 
         // Track what we've already processed to avoid cycles
         let mut processed: HashSet<(String, Ecosystem)> = HashSet::new();
-        let mut metadata_cache: HashMap<(String, Ecosystem, String), PackageMetadata> =
-            HashMap::new();
+        let mut metadata_cache: BTreeMap<(String, Ecosystem, String), PackageMetadata> =
+            BTreeMap::new();
 
         // Track which optional dependencies were requested
         let mut requested_optional: HashSet<(Ecosystem, String)> = HashSet::new();
 
         // Track peer dependency requirements for validation
-        let mut peer_requirements: HashMap<(Ecosystem, String), Vec<(String, VersionReq)>> =
-            HashMap::new();
+        let mut peer_requirements: BTreeMap<(Ecosystem, String), Vec<(String, VersionReq)>> =
+            BTreeMap::new();
 
         // Work queue: (name, ecosystem, version_req, is_direct, from_package, kind)
         let mut queue: VecDeque<(
@@ -693,7 +693,7 @@ impl Resolver {
     /// Apply resolution strategy (MVS or MaxSatisfying) to the graph.
     fn apply_mvs(&self, graph: &mut DependencyGraph, manifest: &Manifest) -> Result<()> {
         // Collect all version requirements per package
-        let mut requirements: HashMap<(Ecosystem, String), Vec<VersionReq>> = HashMap::new();
+        let mut requirements: BTreeMap<(Ecosystem, String), Vec<VersionReq>> = BTreeMap::new();
 
         for node in graph.packages() {
             if node.name == "__root__" {

@@ -100,6 +100,9 @@ enum Commands {
         /// Skip cache lookup
         #[arg(long)]
         no_cache: bool,
+
+        #[command(flatten)]
+        workspace: commands::workspace::WorkspaceOpts,
     },
 
     /// Run a script
@@ -110,6 +113,9 @@ enum Commands {
         /// Arguments to pass to the script
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+
+        #[command(flatten)]
+        workspace: commands::workspace::WorkspaceOpts,
     },
 
     /// Execute a tool transiently (npx-style)
@@ -124,6 +130,12 @@ enum Commands {
 
     /// Start an interactive shell with the hermetic environment
     Shell,
+
+    /// Workspace management
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommands,
+    },
 
     /// Show dependency tree
     Tree {
@@ -175,6 +187,22 @@ enum Commands {
     Completions {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkspaceCommands {
+    /// List workspace members
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show workspace dependency graph
+    Graph {
+        /// Output as DOT format
+        #[arg(long)]
+        dot: bool,
     },
 }
 
@@ -280,13 +308,21 @@ fn main() {
             .entered();
             commands::update(&packages, cli.offline)
         }
-        Commands::Build { release, no_cache } => {
+        Commands::Build {
+            release,
+            no_cache,
+            workspace,
+        } => {
             let _span = info_span!("cmd_build", release, no_cache).entered();
-            commands::build(release, no_cache)
+            commands::build(release, no_cache, workspace)
         }
-        Commands::Run { script, args } => {
+        Commands::Run {
+            script,
+            args,
+            workspace,
+        } => {
             let _span = info_span!("cmd_run", script = %script, args_count = args.len()).entered();
-            commands::run(&script, &args)
+            commands::run(&script, &args, workspace)
         }
         Commands::Exec { package, args } => {
             let _span = info_span!("cmd_exec", package = %package, offline = cli.offline).entered();
@@ -296,6 +332,16 @@ fn main() {
             let _span = info_span!("cmd_shell").entered();
             commands::shell()
         }
+        Commands::Workspace { command } => match command {
+            WorkspaceCommands::List { json } => {
+                let _span = info_span!("cmd_workspace_list", json).entered();
+                commands::workspace::list(json)
+            }
+            WorkspaceCommands::Graph { dot } => {
+                let _span = info_span!("cmd_workspace_graph", dot).entered();
+                commands::workspace::graph(dot)
+            }
+        },
         Commands::Tree { all, depth } => {
             let _span = info_span!("cmd_tree", all, depth = ?depth).entered();
             commands::tree(all, depth)

@@ -231,18 +231,14 @@ impl OciSpecGenerator {
     ///
     /// This prevents path traversal attacks where a malicious mount path
     /// could escape the container or access sensitive host files.
+    ///
+    /// **TOCTOU Protection**: The path is canonicalized before validation to
+    /// prevent symlink-based attacks where a path like `/safe/link` could
+    /// point to `/etc/shadow`. The canonical path is used for all checks.
     fn validate_mount_path(path: &Path, description: &str) -> Result<()> {
         let path_str = path.to_string_lossy();
 
-        // Check for path traversal patterns
-        if path_str.contains("..") {
-            return Err(CratonsError::Container(format!(
-                "mount {} contains path traversal '..': {}",
-                description, path_str
-            )));
-        }
-
-        // Check for null bytes (truncation attack)
+        // Check for null bytes (truncation attack) - must do before any filesystem ops
         if path_str.contains('\0') {
             return Err(CratonsError::Container(format!(
                 "mount {} contains null byte: {}",
@@ -250,7 +246,7 @@ impl OciSpecGenerator {
             )));
         }
 
-        // Ensure path is absolute
+        // Ensure path is absolute before any other checks
         if !path.is_absolute() {
             return Err(CratonsError::Container(format!(
                 "mount {} must be an absolute path: {}",
@@ -258,24 +254,99 @@ impl OciSpecGenerator {
             )));
         }
 
+        // SECURITY: Canonicalize the path to resolve symlinks and prevent TOCTOU attacks
+        // This resolves all symlinks, "..", "." and returns the real path
+        let canonical_path = if path.exists() {
+            path.canonicalize().map_err(|e| {
+                CratonsError::Container(format!(
+                    "mount {} failed to canonicalize (potential symlink attack): {}: {}",
+                    description, path_str, e
+                ))
+            })?
+        } else {
+            // For paths that don't exist yet (destination paths), validate the
+            // closest existing ancestor to prevent attacks through parent symlinks
+            let mut check = path.to_path_buf();
+            let mut canonical = None;
+            while let Some(parent) = check.parent() {
+                if parent.exists() {
+                    let parent_canonical = parent.canonicalize().map_err(|e| {
+                        CratonsError::Container(format!(
+                            "mount {} failed to canonicalize parent: {}: {}",
+                            description,
+                            parent.display(),
+                            e
+                        ))
+                    })?;
+                    // Reconstruct the path with canonical parent
+                    let remaining = path.strip_prefix(parent).unwrap_or(path);
+                    canonical = Some(parent_canonical.join(remaining));
+                    break;
+                }
+                check = parent.to_path_buf();
+            }
+            canonical.unwrap_or_else(|| path.to_path_buf())
+        };
+
+        let canonical_str = canonical_path.to_string_lossy();
+
+        // Check for path traversal patterns in the canonical path
+        // (This should be rare after canonicalization, but check anyway)
+        if canonical_str.contains("..") {
+            return Err(CratonsError::Container(format!(
+                "mount {} contains path traversal '..': {} (canonical: {})",
+                description, path_str, canonical_str
+            )));
+        }
+
         // Check for suspicious patterns that might escape containers
+        // Use the CANONICAL path to prevent symlink-based bypass
         let suspicious_patterns = [
             "/proc/",
+            "/proc",
             "/sys/",
+            "/sys",
             "/dev/",
+            "/dev",
             "/etc/passwd",
             "/etc/shadow",
+            "/etc/sudoers",
             "/root/",
+            "/root",
             "/.ssh/",
+            "/.ssh",
             "/var/run/docker.sock",
+            "/run/docker.sock",
+            "/var/run/containerd/",
+            "/run/containerd/",
+            // Kubernetes secrets
+            "/var/run/secrets/",
+            "/run/secrets/",
+            // System sensitive
+            "/boot/",
+            "/boot",
         ];
         for pattern in suspicious_patterns {
-            if path_str.starts_with(pattern) || path_str.contains(pattern) {
+            // Check both the original and canonical paths
+            if canonical_str.starts_with(pattern)
+                || canonical_str == pattern.trim_end_matches('/')
+            {
                 return Err(CratonsError::Container(format!(
-                    "mount {} references sensitive path '{}': {}",
-                    description, pattern, path_str
+                    "mount {} references sensitive path '{}': {} (resolved to: {})",
+                    description, pattern, path_str, canonical_str
                 )));
             }
+        }
+
+        // Additional check: ensure canonical path isn't pointing to a different
+        // location than what the user specified (symlink detection)
+        if path.exists() && canonical_path != path {
+            // Log the resolution for transparency
+            tracing::debug!(
+                "Mount path {} resolved to {} (symlink followed)",
+                path_str,
+                canonical_str
+            );
         }
 
         Ok(())

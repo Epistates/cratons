@@ -375,7 +375,12 @@ impl Sandbox for WindowsSandbox {
     }
 
     fn isolation_level(&self) -> IsolationLevel {
-        IsolationLevel::OsSandbox
+        // Windows Job Objects only provide resource limits (memory, CPU, process count)
+        // and automatic cleanup (kill-on-close). They do NOT provide filesystem or
+        // network isolation. Therefore, we report Process-level isolation rather than
+        // OsSandbox, which would incorrectly imply filesystem isolation is available.
+        // For full OsSandbox on Windows, AppContainer would be required.
+        IsolationLevel::Process
     }
 
     fn is_available(&self) -> bool {

@@ -274,8 +274,8 @@ fn bench_validate_manifest(c: &mut Criterion) {
         group.bench_function(name, |b| {
             b.iter(|| {
                 // Validation happens during load, but we can check structure
-                let valid = manifest.package.name.is_some()
-                    && manifest.package.version.is_some()
+                let valid = !manifest.package.name.is_empty()
+                    && !manifest.package.version.is_empty()
                     && !manifest.dependencies.is_empty();
                 black_box(valid);
             });

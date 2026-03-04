@@ -124,7 +124,7 @@ impl DownloadDiagnostics {
         }
         // Trim leading whitespace
         let trimmed = bytes.iter().skip_while(|&&b| b == b' ' || b == b'\n' || b == b'\r' || b == b'\t');
-        matches!(trimmed.clone().next(), Some(b'{') | Some(b'['))
+        matches!(trimmed.clone().next(), Some(b'{' | b'['))
     }
 
     /// Check if content looks like HTML.

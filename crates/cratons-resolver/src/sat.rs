@@ -11,7 +11,7 @@ use pubgrub::solver::{Dependencies, DependencyConstraints, DependencyProvider, r
 use pubgrub::version::Version;
 use std::borrow::Borrow;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Debug, Display};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -141,8 +141,8 @@ impl SatResolver {
     pub async fn resolve_multi(
         &self,
         root_deps: Vec<(String, String, Ecosystem)>,
-        strategies: HashMap<Ecosystem, ResolutionStrategy>,
-    ) -> Result<HashMap<(String, Ecosystem), String>> {
+        strategies: BTreeMap<Ecosystem, ResolutionStrategy>,
+    ) -> Result<BTreeMap<(String, Ecosystem), String>> {
         // Use Npm as the "host" ecosystem for root, but it doesn't matter
         // as long as the name is unique.
         let root_package = SatPackage {
@@ -171,7 +171,7 @@ impl SatResolver {
         .map_err(|e| CratonsError::Config(format!("Join error in SAT resolver: {e}")))??;
 
         // Extract results
-        let mut result = HashMap::new();
+        let mut result = BTreeMap::new();
         for (pkg, ver) in solution {
             if pkg.name == "__root__" {
                 continue;
@@ -190,7 +190,7 @@ struct SatDependencyProvider {
     root_deps: Vec<(String, String, Ecosystem)>,
     root_package: SatPackage,
     handle: Handle,
-    strategies: HashMap<Ecosystem, ResolutionStrategy>,
+    strategies: BTreeMap<Ecosystem, ResolutionStrategy>,
 }
 
 impl DependencyProvider<SatPackage, SatVersion> for SatDependencyProvider {

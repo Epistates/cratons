@@ -247,6 +247,7 @@ impl Sandbox for LinuxSandbox {
 /// Blocklist of environment variables that should never be passed to sandboxed processes.
 ///
 /// These variables could be used to escape the sandbox or leak sensitive information.
+/// Reference: <https://www.elttam.com/blog/env/>
 const BLOCKED_ENV_VARS: &[&str] = &[
     // Credential leaks
     "AWS_ACCESS_KEY_ID",
@@ -260,7 +261,10 @@ const BLOCKED_ENV_VARS: &[&str] = &[
     "SSH_AUTH_SOCK",
     "SSH_AGENT_PID",
     "GPG_AGENT_INFO",
-    // Sandbox escapes
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AZURE_CLIENT_SECRET",
+    "DOCKER_AUTH_CONFIG",
+    // Dynamic linker sandbox escapes (Linux)
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
     "LD_AUDIT",
@@ -275,29 +279,99 @@ const BLOCKED_ENV_VARS: &[&str] = &[
     "LD_USE_LOAD_BIAS",
     "LD_VERBOSE",
     "LD_WARN",
+    "LD_BIND_NOW",
+    "LD_BIND_NOT",
+    // Dynamic linker sandbox escapes (macOS)
     "DYLD_INSERT_LIBRARIES",
     "DYLD_LIBRARY_PATH",
     "DYLD_FRAMEWORK_PATH",
-    // Code injection
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_FALLBACK_FRAMEWORK_PATH",
+    "DYLD_IMAGE_SUFFIX",
+    "DYLD_PRINT_TO_FILE",
+    // Glibc exploitation vectors
+    "GCONV_PATH",           // Character conversion path hijacking
+    "MALLOC_CHECK_",        // Memory allocation debugging - can leak info
+    "MALLOC_TRACE",         // Memory allocation tracing - can write files
+    "GLIBC_TUNABLES",       // Glibc tuning - various exploits
+    "HOSTALIASES",          // Hostname resolution hijacking
+    "LOCALDOMAIN",          // DNS domain hijacking
+    "RES_OPTIONS",          // Resolver options manipulation
+    "RESOLV_HOST_CONF",     // Resolver config hijacking
+    // Locale/internationalization hijacking
+    "NLSPATH",              // Message catalog path hijacking
+    "LOCPATH",              // Locale data path hijacking
+    "LANGUAGE",             // Locale fallback chain
+    "LC_ALL",               // Can override all locale settings
+    // Terminal/filesystem path hijacking
+    "TERMINFO",             // Terminal info database path
+    "TERMINFO_DIRS",        // Terminal info search dirs
+    "TERMCAP",              // Terminal capabilities database
+    "TZDIR",                // Timezone directory hijacking
+    "TMPDIR",               // Temporary directory (can redirect writes)
+    "TMP",                  // Temporary directory (Windows compat)
+    "TEMP",                 // Temporary directory (Windows compat)
+    // Code injection - scripting languages
     "PYTHONSTARTUP",
     "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONUSERBASE",
     "RUBYOPT",
+    "RUBYLIB",
     "PERL5OPT",
+    "PERL5LIB",
+    "PERLLIB",
     "NODE_OPTIONS",
-    // Terminal escapes
-    "TERM_PROGRAM",
+    "NODE_PATH",
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_REPL_HISTORY",
+    // Java exploitation
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "CLASSPATH",
+    // Shell and privilege escalation
     "SHELL",
+    "BASH_ENV",
+    "ENV",                  // POSIX shell startup file
+    "CDPATH",               // Can redirect cd commands
+    "GLOBIGNORE",           // Affects glob expansion
+    "SHELLOPTS",            // Shell options
+    "BASHOPTS",             // Bash options
+    "PS4",                  // Debug prompt - can execute code
+    "PROMPT_COMMAND",       // Bash prompt hook - code execution
+    "IFS",                  // Internal field separator manipulation
+    // Sudo/privilege context
     "SUDO_COMMAND",
     "SUDO_USER",
     "SUDO_UID",
     "SUDO_GID",
-    // Process control
+    "SUDO_ASKPASS",
+    "TERM_PROGRAM",
+    // Network proxy (could exfiltrate data)
     "http_proxy",
     "https_proxy",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
     "NO_PROXY",
+    "ftp_proxy",
+    "FTP_PROXY",
+    // Git exploitation
+    "GIT_ASKPASS",
+    "GIT_SSH_COMMAND",
+    "GIT_PROXY_COMMAND",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_EXEC_PATH",
+    "GIT_TEMPLATE_DIR",
+    // Miscellaneous dangerous vars
+    "LD_PROFILE",           // Can write profiling data
+    "EDITOR",               // Could be exploited in some contexts
+    "VISUAL",               // Alternative editor variable
+    "PAGER",                // Pager command execution
+    "BROWSER",              // Browser command execution
+    "LESSOPEN",             // Less preprocessor - code execution
+    "LESSCLOSE",            // Less postprocessor - code execution
 ];
 
 /// Check if an environment variable is safe to pass to sandboxed processes.

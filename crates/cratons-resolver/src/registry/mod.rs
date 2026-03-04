@@ -41,7 +41,7 @@ use governor::{
 use cratons_core::{Ecosystem, CratonsError, Result};
 use cratons_store::{CachedMetadata, RegistryCache};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
@@ -71,17 +71,17 @@ pub struct PackageMetadata {
     /// Integrity hash (algorithm:base64 format)
     pub integrity: String,
     /// Dependencies (name -> version requirement)
-    pub dependencies: HashMap<String, String>,
+    pub dependencies: BTreeMap<String, String>,
     /// Optional dependencies
-    pub optional_dependencies: HashMap<String, String>,
+    pub optional_dependencies: BTreeMap<String, String>,
     /// Peer dependencies (npm-specific)
-    pub peer_dependencies: HashMap<String, String>,
+    pub peer_dependencies: BTreeMap<String, String>,
     /// Peer dependency metadata (npm peerDependenciesMeta).
     /// Maps peer dependency name to its metadata (e.g., optional: true).
     #[serde(default)]
-    pub peer_dependencies_meta: HashMap<String, PeerDependencyMeta>,
+    pub peer_dependencies_meta: BTreeMap<String, PeerDependencyMeta>,
     /// Dev dependencies
-    pub dev_dependencies: HashMap<String, String>,
+    pub dev_dependencies: BTreeMap<String, String>,
     /// Bundled dependencies (npm bundledDependencies/bundleDependencies).
     /// These are included in the package tarball and should be skipped from resolution.
     #[serde(default)]
@@ -92,7 +92,7 @@ pub struct PackageMetadata {
     /// For Rust crates: maps feature names to what they enable
     /// Example: "full" => ["derive", "parsing", "printing"]
     #[serde(default)]
-    pub feature_definitions: HashMap<String, Vec<String>>,
+    pub feature_definitions: BTreeMap<String, Vec<String>>,
 }
 
 impl PackageMetadata {
@@ -103,14 +103,14 @@ impl PackageMetadata {
             version,
             dist_url,
             integrity,
-            dependencies: HashMap::new(),
-            optional_dependencies: HashMap::new(),
-            peer_dependencies: HashMap::new(),
-            peer_dependencies_meta: HashMap::new(),
-            dev_dependencies: HashMap::new(),
+            dependencies: BTreeMap::new(),
+            optional_dependencies: BTreeMap::new(),
+            peer_dependencies: BTreeMap::new(),
+            peer_dependencies_meta: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
             bundled_dependencies: Vec::new(),
             features: Vec::new(),
-            feature_definitions: HashMap::new(),
+            feature_definitions: BTreeMap::new(),
         }
     }
 }
@@ -138,7 +138,7 @@ pub trait RegistryClient: Send + Sync {
 
 /// A combined registry client that routes to ecosystem-specific clients.
 pub struct Registry {
-    clients: HashMap<Ecosystem, Arc<dyn RegistryClient>>,
+    clients: BTreeMap<Ecosystem, Arc<dyn RegistryClient>>,
     http_client: reqwest::Client,
     cache: Option<RegistryCache>,
     offline: bool,
@@ -207,7 +207,7 @@ impl RegistryBuilder {
         ));
 
         let mut registry = Registry {
-            clients: HashMap::new(),
+            clients: BTreeMap::new(),
             http_client: http_client.clone(),
             cache: self.cache,
             offline: self.offline,
@@ -481,9 +481,10 @@ fn cached_to_metadata(cached: CachedMetadata) -> PackageMetadata {
         version: cached.version,
         dist_url: cached.dist_url,
         integrity: cached.integrity,
-        dependencies: cached.dependencies,
-        optional_dependencies: cached.optional_dependencies,
-        peer_dependencies: cached.peer_dependencies,
+        // Convert HashMap to BTreeMap for deterministic ordering
+        dependencies: cached.dependencies.into_iter().collect(),
+        optional_dependencies: cached.optional_dependencies.into_iter().collect(),
+        peer_dependencies: cached.peer_dependencies.into_iter().collect(),
         peer_dependencies_meta: cached
             .peer_dependencies_meta
             .into_iter()
@@ -496,10 +497,10 @@ fn cached_to_metadata(cached: CachedMetadata) -> PackageMetadata {
                 )
             })
             .collect(),
-        dev_dependencies: cached.dev_dependencies,
+        dev_dependencies: cached.dev_dependencies.into_iter().collect(),
         bundled_dependencies: cached.bundled_dependencies,
         features: cached.features,
-        feature_definitions: HashMap::new(), // Cache doesn't store feature definitions
+        feature_definitions: BTreeMap::new(), // Cache doesn't store feature definitions
     }
 }
 
@@ -512,9 +513,10 @@ fn metadata_to_cached(metadata: &PackageMetadata, ecosystem: Ecosystem) -> Cache
         ecosystem: ecosystem.to_string(),
         dist_url: metadata.dist_url.clone(),
         integrity: metadata.integrity.clone(),
-        dependencies: metadata.dependencies.clone(),
-        optional_dependencies: metadata.optional_dependencies.clone(),
-        peer_dependencies: metadata.peer_dependencies.clone(),
+        // Convert BTreeMap to HashMap for cache storage
+        dependencies: metadata.dependencies.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        optional_dependencies: metadata.optional_dependencies.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        peer_dependencies: metadata.peer_dependencies.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         peer_dependencies_meta: metadata
             .peer_dependencies_meta
             .iter()
@@ -527,7 +529,7 @@ fn metadata_to_cached(metadata: &PackageMetadata, ecosystem: Ecosystem) -> Cache
                 )
             })
             .collect(),
-        dev_dependencies: metadata.dev_dependencies.clone(),
+        dev_dependencies: metadata.dev_dependencies.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         bundled_dependencies: metadata.bundled_dependencies.clone(),
         features: metadata.features.clone(),
         cached_at: std::time::SystemTime::now()
@@ -547,7 +549,7 @@ impl Default for Registry {
 #[cfg(test)]
 pub struct MockRegistry {
     ecosystem: Ecosystem,
-    packages: HashMap<String, Vec<String>>,
+    packages: BTreeMap<String, Vec<String>>,
 }
 
 #[cfg(test)]
@@ -557,7 +559,7 @@ impl MockRegistry {
     pub fn new(ecosystem: Ecosystem) -> Self {
         Self {
             ecosystem,
-            packages: HashMap::new(),
+            packages: BTreeMap::new(),
         }
     }
 

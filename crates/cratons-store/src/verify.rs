@@ -444,20 +444,49 @@ impl ToolchainVerifier {
     /// Verify using the best available method for a given ecosystem.
     ///
     /// Tries methods in order of security level (highest first):
-    /// 1. Sigstore (if available)
+    /// 1. Sigstore (if available and ecosystem supports it)
     /// 2. GPG signature (if available)
     /// 3. Minisign (if available)
     /// 4. SHA-256 checksum (if available)
+    ///
+    /// # Security
+    ///
+    /// This method does NOT automatically fetch signatures from URLs.
+    /// Signature data must be provided separately via the specific verify_*
+    /// methods or via `verify_best_with_signatures`.
+    ///
+    /// For full signature verification, use `verify_best_with_signatures` instead.
     pub async fn verify_best(
         &self,
         data: &[u8],
         checksum: Option<&str>,
-        _signature_url: Option<&str>,
-        _ecosystem: &str,
+        signature_url: Option<&str>,
+        ecosystem: &str,
     ) -> Result<VerificationResult> {
-        // For now, use checksum verification
-        // Higher-level callers should use specific verify_* methods
-        // when signature data is available
+        // SECURITY: If a signature URL is provided, we should attempt to fetch and verify
+        // Otherwise, fall back to checksum-only verification
+
+        if let Some(sig_url) = signature_url {
+            // Log that signature verification was requested but we need the signature data
+            debug!(
+                ecosystem = %ecosystem,
+                signature_url = %sig_url,
+                "Signature URL provided but signature data not available. \
+                 Use verify_best_with_signatures for full verification."
+            );
+
+            // SECURITY: If strict mode requires signatures and a signature URL is available,
+            // we should fail rather than silently downgrade to checksum
+            if self.min_security_level >= 2 {
+                return Err(CratonsError::Config(format!(
+                    "Signature verification required (min_security_level={}), \
+                     but signature data was not provided. Signature URL: {}. \
+                     Use verify_best_with_signatures() to fetch and verify signatures.",
+                    self.min_security_level,
+                    sig_url
+                )));
+            }
+        }
 
         if let Some(expected) = checksum {
             let result = self.verify_sha256(data, expected)?;
@@ -472,7 +501,7 @@ impl ToolchainVerifier {
                 } else {
                     return Err(CratonsError::Config(format!(
                         "Verification level {} below required minimum {}. \
-                         Signature verification not available for this artifact.",
+                         Signature verification required for this security level.",
                         result.method.security_level(),
                         self.min_security_level
                     )));
@@ -496,6 +525,175 @@ impl ToolchainVerifier {
             ))
         }
     }
+
+    /// Verify using the best available method with full signature data.
+    ///
+    /// This method performs complete verification including signature verification
+    /// when signature data is provided.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The artifact bytes to verify
+    /// * `checksum` - Optional SHA-256 checksum
+    /// * `signature` - Optional signature data (format depends on ecosystem)
+    /// * `ecosystem` - The ecosystem name ("node", "python", "zig", etc.)
+    ///
+    /// # Security
+    ///
+    /// This method tries verification in order of security level (highest first):
+    /// 1. Sigstore (Python 3.14+)
+    /// 2. GPG signatures (Node.js)
+    /// 3. Minisign (Zig)
+    /// 4. SHA-256 checksum (fallback)
+    pub async fn verify_best_with_signatures(
+        &self,
+        data: &[u8],
+        checksum: Option<&str>,
+        signature: Option<&SignatureData>,
+        ecosystem: &str,
+    ) -> Result<VerificationResult> {
+        // Try signature verification first (higher security level)
+        if let Some(sig_data) = signature {
+            match sig_data {
+                SignatureData::Sigstore { bundle_json, identity, issuer } => {
+                    match self.verify_sigstore(data, bundle_json, identity, issuer).await {
+                        Ok(result) => {
+                            info!(
+                                ecosystem = %ecosystem,
+                                method = "sigstore",
+                                "Signature verification successful"
+                            );
+                            return Ok(result);
+                        }
+                        Err(e) => {
+                            warn!(
+                                ecosystem = %ecosystem,
+                                error = %e,
+                                "Sigstore verification failed, checking fallback options"
+                            );
+                        }
+                    }
+                }
+                SignatureData::Gpg { signature_armor, public_keys } => {
+                    let keys_refs: Vec<&str> = public_keys.iter().map(|s| s.as_str()).collect();
+                    match self.verify_gpg_any_key(data, signature_armor, &keys_refs) {
+                        Ok(result) => {
+                            info!(
+                                ecosystem = %ecosystem,
+                                method = "gpg",
+                                "Signature verification successful"
+                            );
+                            return Ok(result);
+                        }
+                        Err(e) => {
+                            warn!(
+                                ecosystem = %ecosystem,
+                                error = %e,
+                                "GPG verification failed, checking fallback options"
+                            );
+                        }
+                    }
+                }
+                SignatureData::Minisign { signature_str, public_key } => {
+                    match self.verify_minisign(data, signature_str, public_key) {
+                        Ok(result) => {
+                            info!(
+                                ecosystem = %ecosystem,
+                                method = "minisign",
+                                "Signature verification successful"
+                            );
+                            return Ok(result);
+                        }
+                        Err(e) => {
+                            warn!(
+                                ecosystem = %ecosystem,
+                                error = %e,
+                                "Minisign verification failed, checking fallback options"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // SECURITY: If signature was provided but verification failed,
+            // and we require signatures, don't fall back to checksum
+            if self.min_security_level >= 2 && !self.allow_unverified {
+                return Err(CratonsError::Config(format!(
+                    "Signature verification failed and min_security_level={} requires signatures. \
+                     Checksum-only verification is not allowed.",
+                    self.min_security_level
+                )));
+            }
+        }
+
+        // Fall back to checksum verification
+        if let Some(expected) = checksum {
+            let result = self.verify_sha256(data, expected)?;
+
+            if result.method.security_level() < self.min_security_level {
+                if self.allow_unverified {
+                    warn!(
+                        "Verification level {} below minimum {}, but allowing due to permissive mode",
+                        result.method.security_level(),
+                        self.min_security_level
+                    );
+                } else {
+                    return Err(CratonsError::Config(format!(
+                        "Verification level {} below required minimum {}.",
+                        result.method.security_level(),
+                        self.min_security_level
+                    )));
+                }
+            }
+
+            return Ok(result);
+        }
+
+        // No verification available
+        if self.allow_unverified {
+            warn!("No verification available for artifact, proceeding in permissive mode");
+            Ok(VerificationResult {
+                verified: false,
+                method: VerificationMethod::None,
+                details: Some("No checksum or signature available".to_string()),
+            })
+        } else {
+            Err(CratonsError::Config(
+                "No verification method available and unverified downloads are not allowed".into(),
+            ))
+        }
+    }
+}
+
+/// Signature data for verification.
+///
+/// This enum holds the different types of signature data that can be used
+/// for verification, along with the necessary metadata for each type.
+#[derive(Debug, Clone)]
+pub enum SignatureData {
+    /// Sigstore bundle with OIDC identity binding
+    Sigstore {
+        /// The Sigstore bundle JSON
+        bundle_json: String,
+        /// Expected OIDC identity (e.g., "pablogsal@python.org")
+        identity: String,
+        /// Expected OIDC issuer (e.g., "https://accounts.google.com")
+        issuer: String,
+    },
+    /// GPG/OpenPGP detached signature
+    Gpg {
+        /// ASCII-armored signature
+        signature_armor: String,
+        /// List of trusted public keys (ASCII-armored)
+        public_keys: Vec<String>,
+    },
+    /// Minisign signature
+    Minisign {
+        /// The signature string
+        signature_str: String,
+        /// The public key string
+        public_key: String,
+    },
 }
 
 /// TOCTOU-safe verified artifact.

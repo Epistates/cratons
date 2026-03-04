@@ -297,6 +297,8 @@ let stats = gc.dry_run()?;
 println!("Would free {} bytes", stats.bytes_freed);
 ```
 
+**Note**: Garbage collection uses file locking to prevent race conditions. Artifacts in use by other processes are safely skipped.
+
 ## Store Configuration
 
 ```rust
@@ -313,6 +315,32 @@ let config = StoreConfig {
 };
 let store = Store::open(config)?;
 ```
+
+## Security (January 2026)
+
+The store has been hardened following a comprehensive security audit:
+
+### Content-Addressable Storage
+- **Atomic Writes**: Uses temp files with exclusive locking to prevent corruption during concurrent writes
+- **Integrity Verification**: Blake3 hashes verified on both store and retrieve operations
+
+### Remote Cache
+- **SSRF Protection**: S3 endpoints are validated to block:
+  - Localhost and loopback addresses (127.0.0.0/8, ::1)
+  - AWS metadata endpoints (169.254.169.254)
+  - Private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+  - Non-HTTP(S) schemes (file://, ftp://, etc.)
+- **Hash Re-verification**: Downloaded artifacts are re-verified against expected hash after download
+- **Bucket Name Validation**: S3 bucket names validated per AWS naming rules (3-63 chars, lowercase, no consecutive dots)
+
+### Garbage Collection
+- **File Locking**: Artifacts are locked before deletion to prevent race conditions
+- **Graceful Skip**: Artifacts in use by other processes are safely skipped
+
+### Cryptographic Verification
+- **Multi-key GPG**: Supports "any key matches" for ecosystems with multiple release signers
+- **Sigstore**: Keyless verification with OIDC identity binding for Python 3.14+
+- **Minisign**: Ed25519 signature verification for modern toolchains (Zig)
 
 ## Directory Structure
 

@@ -14,7 +14,7 @@
 use async_trait::async_trait;
 use cratons_core::{Ecosystem, CratonsError, Result, validate_package_name, validate_version};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, instrument};
@@ -132,7 +132,7 @@ struct PyPiProjectResponse {
     #[serde(default)]
     urls: Vec<PyPiUrl>,
     #[serde(default)]
-    releases: HashMap<String, Vec<PyPiUrl>>,
+    releases: BTreeMap<String, Vec<PyPiUrl>>,
     #[serde(default)]
     vulnerabilities: Vec<PyPiVulnerability>,
 }
@@ -395,8 +395,8 @@ impl RegistryClient for PyPiClient {
             })?;
 
         // Parse dependencies from requires_dist with marker evaluation
-        let mut dependencies = HashMap::new();
-        let mut optional_dependencies = HashMap::new();
+        let mut dependencies = BTreeMap::new();
+        let mut optional_dependencies = BTreeMap::new();
 
         if let Some(requires) = project.info.requires_dist {
             for req in &requires {
@@ -445,12 +445,12 @@ impl RegistryClient for PyPiClient {
             integrity,
             dependencies,
             optional_dependencies,
-            peer_dependencies: HashMap::new(),
-            peer_dependencies_meta: HashMap::new(),
-            dev_dependencies: HashMap::new(),
+            peer_dependencies: BTreeMap::new(),
+            peer_dependencies_meta: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
             bundled_dependencies: Vec::new(),
             features: Vec::new(),
-            feature_definitions: HashMap::new(),
+            feature_definitions: BTreeMap::new(),
         })
     }
 

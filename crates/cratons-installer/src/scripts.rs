@@ -27,6 +27,97 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use tracing::{debug, info, warn};
 
+/// Information about scripts in a package.
+///
+/// Provides structured access to npm lifecycle scripts for analysis,
+/// pre-flight checks, and selective execution.
+#[derive(Debug, Clone, Default)]
+pub struct PackageScripts {
+    /// Package name (from package.json)
+    pub name: String,
+    /// preinstall script
+    pub preinstall: Option<String>,
+    /// install script
+    pub install: Option<String>,
+    /// postinstall script
+    pub postinstall: Option<String>,
+    /// Whether package has binding.gyp (native module)
+    pub has_native: bool,
+}
+
+impl PackageScripts {
+    /// Parse scripts from a package directory.
+    ///
+    /// Reads package.json and extracts lifecycle scripts and native module info.
+    pub fn from_package_dir(package_dir: &Path) -> Self {
+        let package_json_path = package_dir.join("package.json");
+        let mut scripts = Self::default();
+
+        scripts.has_native = package_dir.join("binding.gyp").exists();
+
+        let Ok(content) = fs::read_to_string(&package_json_path) else {
+            return scripts;
+        };
+
+        let Ok(package_json): std::result::Result<serde_json::Value, _> =
+            serde_json::from_str(&content)
+        else {
+            return scripts;
+        };
+
+        // Extract package name
+        scripts.name = package_json
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        // Extract lifecycle scripts
+        if let Some(serde_json::Value::Object(s)) = package_json.get("scripts") {
+            scripts.preinstall = s
+                .get("preinstall")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            scripts.install = s
+                .get("install")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            scripts.postinstall = s
+                .get("postinstall")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+        }
+
+        scripts
+    }
+
+    /// Check if there are any lifecycle scripts to run.
+    #[must_use]
+    pub fn has_lifecycle_scripts(&self) -> bool {
+        self.preinstall.is_some() || self.install.is_some() || self.postinstall.is_some()
+    }
+
+    /// Check if there's anything to execute (scripts or native build).
+    #[must_use]
+    pub fn has_any(&self) -> bool {
+        self.has_lifecycle_scripts() || self.has_native
+    }
+
+    /// Get scripts in execution order as (name, script) pairs.
+    pub fn lifecycle_scripts(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        [
+            ("preinstall", self.preinstall.as_deref()),
+            ("install", self.install.as_deref()),
+            ("postinstall", self.postinstall.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(name, script)| script.map(|s| (name, s)))
+    }
+}
+
 /// Runs post-install scripts for packages.
 pub struct PostInstallRunner {
     /// Whether to isolate scripts in containers
@@ -41,44 +132,22 @@ impl PostInstallRunner {
 
     /// Run post-install scripts for an npm package.
     ///
-    /// npm lifecycle scripts:
-    /// - preinstall
-    /// - install
-    /// - postinstall
+    /// Executes lifecycle scripts in order: preinstall → install → postinstall
     pub async fn run_scripts(&self, package_dir: &Path, project_dir: &Path) -> Result<()> {
-        // Read package.json
-        let package_json_path = package_dir.join("package.json");
-        if !package_json_path.exists() {
-            return Ok(()); // No package.json, nothing to do
+        let scripts = PackageScripts::from_package_dir(package_dir);
+
+        if !scripts.has_lifecycle_scripts() {
+            return Ok(());
         }
 
-        let package_json: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&package_json_path)?)?;
-
-        let scripts = match package_json.get("scripts") {
-            Some(serde_json::Value::Object(s)) => s,
-            _ => return Ok(()), // No scripts
-        };
-
-        let package_name = package_json
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("unknown");
-
         // Run lifecycle scripts in order
-        for script_name in &["preinstall", "install", "postinstall"] {
-            if let Some(serde_json::Value::String(script)) = scripts.get(*script_name) {
-                if script.is_empty() {
-                    continue;
-                }
+        for (script_name, script) in scripts.lifecycle_scripts() {
+            debug!("Running {} script for {}", script_name, scripts.name);
 
-                debug!("Running {} script for {}", script_name, package_name);
-
-                if self.isolate {
-                    self.run_isolated(script, package_dir, project_dir).await?;
-                } else {
-                    self.run_direct(script, package_dir)?;
-                }
+            if self.isolate {
+                self.run_isolated(script, package_dir, project_dir).await?;
+            } else {
+                self.run_direct(script, package_dir)?;
             }
         }
 
@@ -225,34 +294,11 @@ impl PostInstallRunner {
     }
 
     /// Check if a package has lifecycle scripts.
+    ///
+    /// This is a convenience method that creates a `PackageScripts` internally.
+    /// For repeated checks, prefer creating `PackageScripts` once and reusing it.
     pub fn has_scripts(package_dir: &Path) -> bool {
-        let package_json_path = package_dir.join("package.json");
-        if !package_json_path.exists() {
-            return false;
-        }
-
-        let Ok(content) = fs::read_to_string(&package_json_path) else {
-            return false;
-        };
-
-        let Ok(package_json): std::result::Result<serde_json::Value, _> =
-            serde_json::from_str(&content)
-        else {
-            return false;
-        };
-
-        let Some(scripts) = package_json.get("scripts") else {
-            return false;
-        };
-
-        let Some(scripts_obj) = scripts.as_object() else {
-            return false;
-        };
-
-        // Check for lifecycle scripts
-        scripts_obj.contains_key("preinstall")
-            || scripts_obj.contains_key("install")
-            || scripts_obj.contains_key("postinstall")
+        PackageScripts::from_package_dir(package_dir).has_lifecycle_scripts()
     }
 
     /// Run binding.gyp native compilation (node-gyp).
@@ -293,60 +339,32 @@ impl PostInstallRunner {
             }
         }
     }
-}
 
-/// Information about scripts in a package.
-#[derive(Debug, Clone, Default)]
-pub struct PackageScripts {
-    /// preinstall script
-    pub preinstall: Option<String>,
-    /// install script
-    pub install: Option<String>,
-    /// postinstall script
-    pub postinstall: Option<String>,
-    /// Whether package has binding.gyp (native module)
-    pub has_native: bool,
-}
+    /// Run all scripts and native builds for a package.
+    ///
+    /// Combines lifecycle script execution with node-gyp for native modules.
+    pub async fn run_all(&self, package_dir: &Path, project_dir: &Path) -> Result<()> {
+        let scripts = PackageScripts::from_package_dir(package_dir);
 
-impl PackageScripts {
-    /// Parse scripts from a package directory.
-    pub fn from_package_dir(package_dir: &Path) -> Self {
-        let package_json_path = package_dir.join("package.json");
-        let mut scripts = Self::default();
+        // Run lifecycle scripts first
+        if scripts.has_lifecycle_scripts() {
+            for (script_name, script) in scripts.lifecycle_scripts() {
+                debug!("Running {} script for {}", script_name, scripts.name);
 
-        scripts.has_native = package_dir.join("binding.gyp").exists();
-
-        let Ok(content) = fs::read_to_string(&package_json_path) else {
-            return scripts;
-        };
-
-        let Ok(package_json): std::result::Result<serde_json::Value, _> =
-            serde_json::from_str(&content)
-        else {
-            return scripts;
-        };
-
-        if let Some(serde_json::Value::Object(s)) = package_json.get("scripts") {
-            scripts.preinstall = s
-                .get("preinstall")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            scripts.install = s.get("install").and_then(|v| v.as_str()).map(String::from);
-            scripts.postinstall = s
-                .get("postinstall")
-                .and_then(|v| v.as_str())
-                .map(String::from);
+                if self.isolate {
+                    self.run_isolated(script, package_dir, project_dir).await?;
+                } else {
+                    self.run_direct(script, package_dir)?;
+                }
+            }
         }
 
-        scripts
-    }
+        // Run node-gyp for native modules
+        if scripts.has_native {
+            self.run_node_gyp(package_dir).await?;
+        }
 
-    /// Check if there are any scripts to run.
-    pub fn has_any(&self) -> bool {
-        self.preinstall.is_some()
-            || self.install.is_some()
-            || self.postinstall.is_some()
-            || self.has_native
+        Ok(())
     }
 }
 
@@ -395,21 +413,24 @@ mod tests {
 
         let scripts = PackageScripts::from_package_dir(dir.path());
 
+        assert_eq!(scripts.name, "test");
         assert_eq!(scripts.preinstall, Some("echo pre".to_string()));
         assert_eq!(scripts.install, None);
         assert_eq!(scripts.postinstall, Some("echo post".to_string()));
         assert!(!scripts.has_native);
         assert!(scripts.has_any());
+        assert!(scripts.has_lifecycle_scripts());
     }
 
     #[test]
     fn test_native_module_detection() {
         let dir = tempdir().unwrap();
 
-        fs::write(dir.path().join("package.json"), "{}").unwrap();
+        fs::write(dir.path().join("package.json"), r#"{"name": "test"}"#).unwrap();
 
         let scripts = PackageScripts::from_package_dir(dir.path());
         assert!(!scripts.has_native);
+        assert!(!scripts.has_any());
 
         // Add binding.gyp
         fs::write(dir.path().join("binding.gyp"), "{}").unwrap();
@@ -417,5 +438,54 @@ mod tests {
         let scripts = PackageScripts::from_package_dir(dir.path());
         assert!(scripts.has_native);
         assert!(scripts.has_any());
+        assert!(!scripts.has_lifecycle_scripts());
+    }
+
+    #[test]
+    fn test_lifecycle_scripts_iterator() {
+        let dir = tempdir().unwrap();
+
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name": "test",
+                "scripts": {
+                    "preinstall": "echo pre",
+                    "install": "echo install",
+                    "postinstall": "echo post"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let scripts = PackageScripts::from_package_dir(dir.path());
+        let lifecycle: Vec<_> = scripts.lifecycle_scripts().collect();
+
+        assert_eq!(lifecycle.len(), 3);
+        assert_eq!(lifecycle[0], ("preinstall", "echo pre"));
+        assert_eq!(lifecycle[1], ("install", "echo install"));
+        assert_eq!(lifecycle[2], ("postinstall", "echo post"));
+    }
+
+    #[test]
+    fn test_empty_scripts_filtered() {
+        let dir = tempdir().unwrap();
+
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name": "test",
+                "scripts": {
+                    "preinstall": "",
+                    "postinstall": "echo post"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let scripts = PackageScripts::from_package_dir(dir.path());
+
+        assert_eq!(scripts.preinstall, None); // Empty string filtered out
+        assert_eq!(scripts.postinstall, Some("echo post".to_string()));
     }
 }

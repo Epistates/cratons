@@ -1,5 +1,8 @@
 //! CLI command implementations.
 
+pub mod workspace;
+
+use workspace::WorkspaceOpts;
 use indicatif::{ProgressBar, ProgressStyle};
 use cratons_core::Ecosystem;
 use cratons_installer::{InstallerConfig, LinkStrategy};
@@ -792,13 +795,60 @@ async fn exec_async(package: &str, args: &[String], offline: bool) -> Result<()>
 }
 
 /// Build the project.
-pub fn build(release: bool, no_cache: bool) -> Result<()> {
+pub fn build(release: bool, no_cache: bool, workspace_opts: WorkspaceOpts) -> Result<()> {
     let rt = tokio::runtime::Runtime::new().into_diagnostic()?;
-    rt.block_on(build_async(release, no_cache))
+    rt.block_on(build_async(release, no_cache, workspace_opts))
 }
 
 /// Async implementation of build.
-async fn build_async(release: bool, no_cache: bool) -> Result<()> {
+async fn build_async(release: bool, no_cache: bool, workspace_opts: WorkspaceOpts) -> Result<()> {
+    // Try to load workspace
+    if let Ok(workspace) = cratons_workspace::Workspace::load(Path::new(".")) {
+        let filter = workspace_opts.to_filter()?;
+
+        // Execute build for selected members
+        let executor = cratons_workspace::WorkspaceExecutor::new(&workspace)
+            .with_filter(filter)
+            .topological(); // Always build topological
+
+        let selected = executor
+            .selected_members()
+            .map_err(|e| miette::miette!("Failed to select workspace members: {}", e))?;
+
+        if selected.is_empty() {
+            // Check if we are in a subdirectory that is a workspace member but not the root
+            // Note: Workspace::load(".") only works if . is the root.
+            // If we are here, we are at the workspace root.
+            // If selected is empty, it means the filter matched nothing.
+            
+            // However, if no filter was provided (default), we might want to build ALL members?
+            // Current WorkspaceOpts logic: empty filter = match all?
+            // Let's check WorkspaceOpts::to_filter implementation.
+            // It defaults to empty filter which matches all.
+            // So if selected is empty, the workspace is empty.
+            
+            println!("{} No packages to build", "!".yellow());
+            return Ok(());
+        }
+
+        println!(
+            "{} Building {} packages in workspace",
+            "→".blue(),
+            selected.len()
+        );
+
+        // Open store once
+        let store =
+            Store::open_default().map_err(|e| miette::miette!("Failed to open store: {}", e))?;
+
+        for member in selected {
+            build_package(&member.manifest, &member.path, release, no_cache, &store).await?;
+        }
+
+        return Ok(());
+    }
+
+    // Fallback to single package build
     let (manifest, manifest_path) =
         Manifest::find_and_load(".").map_err(|e| miette::miette!("{}", e))?;
 
@@ -807,6 +857,19 @@ async fn build_async(release: bool, no_cache: bool) -> Result<()> {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
+    let store =
+        Store::open_default().map_err(|e| miette::miette!("Failed to open store: {}", e))?;
+
+    build_package(&manifest, &project_dir, release, no_cache, &store).await
+}
+
+async fn build_package(
+    manifest: &Manifest,
+    project_dir: &Path,
+    release: bool,
+    no_cache: bool,
+    store: &Store,
+) -> Result<()> {
     let mode = if release { "release" } else { "debug" };
     println!(
         "{} Building {} in {} mode",
@@ -823,11 +886,15 @@ async fn build_async(release: bool, no_cache: bool) -> Result<()> {
     let build_script = match &manifest.build.script {
         cratons_manifest::parse::BuildScript::Inline(s) if s.is_empty() => {
             // No build script defined - check for a "build" script in scripts section
-            manifest.scripts.get("build")
-                .cloned()
-                .ok_or_else(|| miette::miette!(
-                    "No build script defined. Add a [build] section or a 'build' script to your cratons.toml"
-                ))?
+            match manifest.scripts.get("build") {
+                Some(s) => s.clone(),
+                None => {
+                    return Err(miette::miette!(
+                        "No build script defined for {}. Add a [build] section or a 'build' script to your cratons.toml",
+                        manifest.package.name
+                    ));
+                }
+            }
         }
         cratons_manifest::parse::BuildScript::Inline(s) => s.clone(),
         cratons_manifest::parse::BuildScript::File { file } => {
@@ -836,10 +903,6 @@ async fn build_async(release: bool, no_cache: bool) -> Result<()> {
                 .map_err(|e| miette::miette!("Failed to read build script {}: {}", file, e))?
         }
     };
-
-    // Open the store
-    let store =
-        Store::open_default().map_err(|e| miette::miette!("Failed to open store: {}", e))?;
 
     // Create build configuration
     let mut config = cratons_builder::BuildConfig::new(
@@ -894,7 +957,7 @@ async fn build_async(release: bool, no_cache: bool) -> Result<()> {
     .emit();
 
     let start = std::time::Instant::now();
-    let result = match cratons_builder::build(&store, &config, &project_dir).await {
+    let result = match cratons_builder::build(store, &config, project_dir).await {
         Ok(res) => res,
         Err(e) => {
             cratons_core::BuildEvent::BuildFinished {
@@ -939,7 +1002,54 @@ async fn build_async(release: bool, no_cache: bool) -> Result<()> {
 }
 
 /// Run a script in the hermetic environment.
-pub fn run(script: &str, args: &[String]) -> Result<()> {
+pub fn run(script: &str, args: &[String], workspace_opts: WorkspaceOpts) -> Result<()> {
+    // Try to load workspace
+    if let Ok(workspace) = cratons_workspace::Workspace::load(Path::new(".")) {
+        let filter = workspace_opts.to_filter()?;
+        let executor = cratons_workspace::WorkspaceExecutor::new(&workspace)
+            .with_filter(filter)
+            .topological();
+
+        let selected = executor
+            .selected_members()
+            .map_err(|e| miette::miette!("Failed to select workspace members: {}", e))?;
+
+        if selected.is_empty() {
+            println!("{} No packages selected", "!".yellow());
+            return Ok(());
+        }
+
+        println!(
+            "{} Running script '{}' in {} packages",
+            "→".blue(),
+            script.cyan(),
+            selected.len()
+        );
+
+        for member in selected {
+            // Check if member has the script
+            if member.manifest.scripts.has(script) {
+                println!(
+                    "{} In package {}:",
+                    "→".blue(),
+                    member.manifest.package.name.cyan()
+                );
+                if let Err(e) = run_package_script(script, args, &member.manifest, &member.path) {
+                    println!("{} Script failed: {}", "!".red(), e);
+                    if executor.is_fail_fast() {
+                        return Err(e);
+                    }
+                }
+                println!();
+            } else {
+                // If specific filter was used, we might want to warn.
+                // But for "all", skipping is expected.
+                // For now, silent skip to reduce noise, unless debugging.
+            }
+        }
+        return Ok(());
+    }
+
     let (manifest, manifest_path) =
         Manifest::find_and_load(".").map_err(|e| miette::miette!("{}", e))?;
 
@@ -948,6 +1058,15 @@ pub fn run(script: &str, args: &[String]) -> Result<()> {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
+    run_package_script(script, args, &manifest, &project_dir)
+}
+
+fn run_package_script(
+    script: &str,
+    args: &[String],
+    manifest: &Manifest,
+    project_dir: &Path,
+) -> Result<()> {
     let script_cmd = manifest
         .scripts
         .get(script)
@@ -957,11 +1076,13 @@ pub fn run(script: &str, args: &[String]) -> Result<()> {
     println!("{} {}", "$".dimmed(), script_cmd);
 
     // Load environment variables from hermetic environment
-    let env_vars = load_environment_vars(&project_dir)?;
+    let env_vars = load_environment_vars(project_dir)?;
 
     // Execute the script with hermetic environment
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c").arg(script_cmd).args(args);
+    // Important: run in the package directory
+    cmd.current_dir(project_dir);
 
     // Inject hermetic environment variables
     for (key, value) in &env_vars {

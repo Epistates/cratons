@@ -122,8 +122,13 @@ Cratons provides sandboxed execution with graceful degradation:
 |----------|-----------------|------------|
 | Linux    | Container       | Namespaces, cgroups, seccomp (libcontainer) |
 | macOS    | OS Sandbox      | sandbox-exec with SBPL profiles |
-| Windows  | Job Objects     | Process isolation |
+| Windows  | Process         | Job Objects (resource limits only) |
 | Fallback | Process         | Minimal isolation |
+
+**Security Hardening**:
+- Linux: Seccomp syscall filtering blocks dangerous syscalls (`unshare`, `mount`, `ptrace`, etc.)
+- macOS: Strict executable whitelist (~50 system binaries), network binaries blocked unless network enabled
+- All platforms: 100+ dangerous environment variables blocked (glibc exploitation, credential leakage, locale hijacking)
 
 ### Hybrid Resolution
 
@@ -163,6 +168,8 @@ cratons gc             # Garbage collect unused artifacts
 cratons store info     # Show store information
 cratons cache push     # Push to remote cache
 cratons cache fetch    # Fetch from remote cache
+cratons workspace list # List workspace members
+cratons workspace graph # Show workspace dependency graph
 ```
 
 ## Configuration
@@ -231,7 +238,7 @@ Cratons is in active R&D. Current status:
 - [x] Remote cache (S3, filesystem, HTTP)
 - [x] Security auditing with vulnerability detection
 - [x] Toolchain management (download & verify: Sigstore/GPG)
-- [ ] Workspace/monorepo support (structure in place)
+- [x] Workspace/monorepo support (glob patterns, topological ordering, filtering)
 
 ## License
 

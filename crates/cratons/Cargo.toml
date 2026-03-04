@@ -49,6 +49,7 @@ opentelemetry = "0.21"
 opentelemetry_sdk = { version = "0.21", features = ["rt-tokio"] }
 opentelemetry-otlp = "0.14"
 tracing-opentelemetry = "0.22"
+pathdiff.workspace = true
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

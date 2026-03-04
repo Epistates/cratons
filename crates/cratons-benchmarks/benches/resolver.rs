@@ -10,7 +10,7 @@ use cratons_benchmarks::{
 };
 use cratons_core::{Ecosystem, Version, VersionReq};
 use cratons_manifest::Manifest;
-use cratons_resolver::graph::DependencyGraph;
+use cratons_resolver::graph::{DependencyGraph, DependencyKind};
 
 /// Benchmark dependency graph construction.
 fn bench_graph_construction(c: &mut Criterion) {
@@ -89,7 +89,7 @@ fn bench_mvs_small_tree(c: &mut Criterion) {
         b.iter(|| {
             // Simulate MVS: graph construction + version selection
             let mut graph = DependencyGraph::new();
-            for (name, _) in manifest.dependencies.iter() {
+            for (_eco, name, _) in manifest.dependencies.iter() {
                 graph.add_package(name, Ecosystem::Npm);
                 let versions = create_version_map(name, 10);
                 graph.set_versions(name, Ecosystem::Npm, versions);
@@ -105,7 +105,7 @@ fn bench_mvs_medium_tree(c: &mut Criterion) {
         let manifest = generate_medium_manifest();
         b.iter(|| {
             let mut graph = DependencyGraph::new();
-            for (name, _) in manifest.dependencies.iter() {
+            for (_eco, name, _) in manifest.dependencies.iter() {
                 graph.add_package(name, Ecosystem::Npm);
                 let versions = create_version_map(name, 20);
                 graph.set_versions(name, Ecosystem::Npm, versions);
@@ -122,7 +122,7 @@ fn bench_mvs_large_tree(c: &mut Criterion) {
         b.iter(|| {
             let mut graph = DependencyGraph::new();
             // Only process first 200 to keep benchmark reasonable
-            for (name, _) in manifest.dependencies.iter().take(200) {
+            for (_eco, name, _) in manifest.dependencies.iter().take(200) {
                 graph.add_package(name, Ecosystem::Npm);
                 let versions = create_version_map(name, 30);
                 graph.set_versions(name, Ecosystem::Npm, versions);
@@ -156,6 +156,7 @@ fn bench_graph_traversal(c: &mut Criterion) {
                         VersionReq::Any,
                         true,
                         vec![],
+                        DependencyKind::Normal,
                     );
                 } else {
                     let parent = format!("package-{}", i - 1);
@@ -167,6 +168,7 @@ fn bench_graph_traversal(c: &mut Criterion) {
                         VersionReq::Any,
                         false,
                         vec![],
+                        DependencyKind::Normal,
                     );
                 }
             }
@@ -264,6 +266,7 @@ fn bench_transitive_resolution(c: &mut Criterion) {
                     VersionReq::Any,
                     i == 0,
                     vec![],
+                    DependencyKind::Normal,
                 );
             }
 

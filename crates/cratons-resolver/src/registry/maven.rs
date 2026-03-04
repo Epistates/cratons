@@ -18,7 +18,7 @@
 use async_trait::async_trait;
 use cratons_core::{Ecosystem, CratonsError, Result, validate_package_name, validate_version};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tracing::{debug, instrument};
 
 use super::{PackageMetadata, RegistryClient};
@@ -148,8 +148,8 @@ impl MavenClient {
     }
 
     /// Parse POM XML to extract dependencies.
-    fn parse_pom_dependencies(xml: &str) -> HashMap<String, String> {
-        let mut deps = HashMap::new();
+    fn parse_pom_dependencies(xml: &str) -> BTreeMap<String, String> {
+        let mut deps = BTreeMap::new();
 
         // Simple state machine for parsing dependencies
         // Full structure: <dependencies><dependency><groupId>...</groupId><artifactId>...</artifactId><version>...</version></dependency></dependencies>
@@ -340,7 +340,7 @@ impl RegistryClient for MavenClient {
                 .map_err(|e| CratonsError::Network(format!("Failed to read POM: {}", e)))?;
             Self::parse_pom_dependencies(&pom_xml)
         } else {
-            HashMap::new()
+            BTreeMap::new()
         };
 
         // Get JAR URL and check for SHA1 checksum
@@ -368,13 +368,13 @@ impl RegistryClient for MavenClient {
             dist_url: jar_url,
             integrity,
             dependencies,
-            optional_dependencies: HashMap::new(),
-            peer_dependencies: HashMap::new(),
-            peer_dependencies_meta: HashMap::new(),
-            dev_dependencies: HashMap::new(),
+            optional_dependencies: BTreeMap::new(),
+            peer_dependencies: BTreeMap::new(),
+            peer_dependencies_meta: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
             bundled_dependencies: Vec::new(),
             features: Vec::new(),
-            feature_definitions: HashMap::new(),
+            feature_definitions: BTreeMap::new(),
         })
     }
 

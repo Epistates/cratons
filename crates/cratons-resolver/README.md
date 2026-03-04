@@ -194,13 +194,15 @@ pub struct PackageMetadata {
     pub version: String,
     pub dist_url: String,              // Download URL
     pub integrity: String,             // Integrity hash
-    pub dependencies: HashMap<String, String>,
-    pub optional_dependencies: HashMap<String, String>,
-    pub peer_dependencies: HashMap<String, String>,
-    pub dev_dependencies: HashMap<String, String>,
+    pub dependencies: BTreeMap<String, String>,
+    pub optional_dependencies: BTreeMap<String, String>,
+    pub peer_dependencies: BTreeMap<String, String>,
+    pub dev_dependencies: BTreeMap<String, String>,
     pub features: Vec<String>,         // Cargo features, pip extras
 }
 ```
+
+**Note**: `BTreeMap` is used instead of `HashMap` to ensure deterministic iteration order across all operations.
 
 ## Resolution Result
 

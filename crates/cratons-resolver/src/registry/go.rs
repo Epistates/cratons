@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use cratons_core::{Ecosystem, CratonsError, Result, validate_package_name, validate_version};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tracing::{debug, instrument};
 
 use super::{PackageMetadata, RegistryClient};
@@ -76,7 +76,7 @@ impl GoProxyClient {
     }
 
     /// Parse go.mod file to extract dependencies (M-15: handle replace/exclude).
-    fn parse_go_mod(content: &str) -> HashMap<String, String> {
+    fn parse_go_mod(content: &str) -> BTreeMap<String, String> {
         GoModFile::parse(content).require
     }
 }
@@ -89,9 +89,9 @@ pub struct GoModFile {
     /// Go version requirement
     pub go_version: Option<String>,
     /// Required dependencies
-    pub require: HashMap<String, String>,
+    pub require: BTreeMap<String, String>,
     /// Replace directives (old -> new path, optional version)
-    pub replace: HashMap<String, (String, Option<String>)>,
+    pub replace: BTreeMap<String, (String, Option<String>)>,
     /// Excluded module versions
     pub exclude: Vec<(String, String)>,
     /// Retracted versions (security concern)
@@ -244,7 +244,7 @@ impl GoModFile {
     }
 
     /// Parse a single replace directive line.
-    fn parse_replace_line(line: &str, replace_map: &mut HashMap<String, (String, Option<String>)>) {
+    fn parse_replace_line(line: &str, replace_map: &mut BTreeMap<String, (String, Option<String>)>) {
         // Format: old [version] => new [version]
         // or: old => new [version]
         if let Some((old_part, new_part)) = line.split_once("=>") {
@@ -408,7 +408,7 @@ impl RegistryClient for GoProxyClient {
                 .map_err(|e| CratonsError::Network(format!("Failed to read go.mod: {}", e)))?;
             Self::parse_go_mod(&mod_content)
         } else {
-            HashMap::new()
+            BTreeMap::new()
         };
 
         // Download URL: /{module}/@v/{version}.zip
@@ -429,13 +429,13 @@ impl RegistryClient for GoProxyClient {
             dist_url: zip_url,
             integrity,
             dependencies,
-            optional_dependencies: HashMap::new(),
-            peer_dependencies: HashMap::new(),
-            peer_dependencies_meta: HashMap::new(),
-            dev_dependencies: HashMap::new(),
+            optional_dependencies: BTreeMap::new(),
+            peer_dependencies: BTreeMap::new(),
+            peer_dependencies_meta: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
             bundled_dependencies: Vec::new(),
             features: Vec::new(),
-            feature_definitions: HashMap::new(),
+            feature_definitions: BTreeMap::new(),
         })
     }
 

@@ -198,24 +198,39 @@ match sandbox.execute(&config).await {
 - Use read-only mounts for toolchains and dependencies
 - Disable network access for reproducible builds
 
-## Security Hardening (December 2025)
+## Security Hardening (January 2026)
 
 The sandbox has been hardened following a comprehensive security audit:
 
-### Linux (seccomp.rs)
+### Linux (seccomp.rs, linux.rs)
 - **Syscall Filtering**: Blocks dangerous syscalls: `unshare`, `mount`, `umount`, `pivot_root`, `ptrace`, `setns`
 - **Full OCI Support**: Container sandbox via `container.rs` with crun/runc runtime
+- **Environment Blocklist**: 100+ dangerous variables blocked including:
+  - Glibc exploitation: `GCONV_PATH`, `MALLOC_CHECK_`, `MALLOC_TRACE`, `GLIBC_TUNABLES`
+  - DNS/Network hijacking: `HOSTALIASES`, `LOCALDOMAIN`, `RES_OPTIONS`, `RESOLV_HOST_CONF`
+  - Locale/i18n hijacking: `NLSPATH`, `LOCPATH`, `LANGUAGE`, `LC_ALL`
+  - Terminal hijacking: `TERMINFO`, `TERMINFO_DIRS`, `TERMCAP`
+  - Shell exploits: `BASH_ENV`, `ENV`, `ZDOTDIR`, `SHELLOPTS`
+  - Credential leakage: `AWS_*`, `GITHUB_TOKEN`, `NPM_TOKEN`, `DOCKER_*`
 
 ### macOS (macos.rs)
-- **Process Execution Restriction**: Only ~50 whitelisted system binaries can execute:
-  - `/bin/sh`, `/bin/bash`, `/usr/bin/env`, `/usr/bin/python3`, etc.
-- **Environment Sanitization**: Dangerous variables blocked:
-  - `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `AWS_*`, `GITHUB_TOKEN`, etc.
+- **Process Execution Restriction**: Strict whitelist of system binaries only:
+  - Core: `/bin/sh`, `/bin/bash`, `/usr/bin/env`, `/usr/bin/python3`
+  - Build tools: Xcode.app, CommandLineTools paths
+  - **Removed**: `/usr/local/bin`, `/opt/homebrew/bin` (too permissive)
+- **Network-Aware Binaries**: `curl`, `nc`, `nslookup`, `dig`, `host` only available when `NetworkAccess::Full`
+- **Environment Sanitization**: Same 100+ variable blocklist as Linux
 - **Reproducible Locale**: Forces `LANG=C.UTF-8` for consistent builds
+
+### Windows (windows.rs)
+- **Accurate Isolation Level**: Reports `IsolationLevel::Process` (not `OsSandbox`)
+- Job Objects provide resource limits but not filesystem/network isolation
+- Same environment variable sanitization as other platforms
 
 ### All Platforms
 - Environment variable validation (alphanumeric + underscore only)
-- Blocklist of sensitive variables (credentials, injection vectors)
+- TOCTOU-safe mount path validation with symlink canonicalization
+- Blocklist of 100+ sensitive variables (credentials, injection vectors, locale hijacking)
 
 ## Testing
 

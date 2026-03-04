@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use cratons_core::{Ecosystem, CratonsError, Result, validate_package_name, validate_version, normalize_checksum_format};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tracing::{debug, instrument};
 
 use super::{PackageMetadata, RegistryClient};
@@ -89,7 +89,7 @@ struct IndexLine {
     #[serde(rename = "cksum")]
     checksum: String,
     #[serde(default)]
-    features: HashMap<String, Vec<String>>,
+    features: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     yanked: bool,
     #[serde(default)]
@@ -97,7 +97,7 @@ struct IndexLine {
     #[serde(rename = "v", default)]
     format_version: Option<u32>,
     #[serde(default)]
-    features2: HashMap<String, Vec<String>>,
+    features2: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     rust_version: Option<String>,
 }
@@ -280,9 +280,9 @@ impl RegistryClient for CratesIoClient {
         })?;
 
         // Convert dependencies
-        let mut dependencies = HashMap::new();
-        let mut dev_dependencies = HashMap::new();
-        let mut optional_dependencies = HashMap::new();
+        let mut dependencies = BTreeMap::new();
+        let mut dev_dependencies = BTreeMap::new();
+        let mut optional_dependencies = BTreeMap::new();
 
         for dep in &index_line.deps {
             // Use the actual package name if renamed
@@ -326,8 +326,8 @@ impl RegistryClient for CratesIoClient {
             integrity: normalize_checksum_format(&format!("sha256-{}", index_line.checksum))?,
             dependencies,
             optional_dependencies,
-            peer_dependencies: HashMap::new(),
-            peer_dependencies_meta: HashMap::new(),
+            peer_dependencies: BTreeMap::new(),
+            peer_dependencies_meta: BTreeMap::new(),
             dev_dependencies,
             bundled_dependencies: Vec::new(),
             features: all_features,

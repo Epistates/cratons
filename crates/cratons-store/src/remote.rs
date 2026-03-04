@@ -271,9 +271,27 @@ impl S3Backend {
     }
 
     /// Build the URL for an S3 object.
-    fn object_url(&self, key: &str) -> String {
+    ///
+    /// # Security
+    ///
+    /// This method validates the endpoint URL to prevent SSRF attacks:
+    /// - Only http/https schemes are allowed
+    /// - Localhost and private IP ranges are blocked
+    /// - Bucket names are validated
+    fn object_url(&self, key: &str) -> Result<String> {
+        // SECURITY: Validate bucket name format to prevent injection
+        if !Self::is_valid_bucket_name(&self.bucket) {
+            return Err(CratonsError::Config(format!(
+                "Invalid S3 bucket name: {}",
+                self.bucket
+            )));
+        }
+
+        // SECURITY: Validate endpoint URL to prevent SSRF
+        Self::validate_endpoint(&self.endpoint)?;
+
         if self.path_style {
-            format!("{}/{}/{}", self.endpoint, self.bucket, key)
+            Ok(format!("{}/{}/{}", self.endpoint, self.bucket, key))
         } else {
             let host = self.endpoint.replace("https://", "").replace("http://", "");
             let protocol = if self.endpoint.starts_with("http://") {
@@ -281,7 +299,164 @@ impl S3Backend {
             } else {
                 "https"
             };
-            format!("{}://{}.{}/{}", protocol, self.bucket, host, key)
+            Ok(format!("{}://{}.{}/{}", protocol, self.bucket, host, key))
+        }
+    }
+
+    /// Validate S3 bucket name according to AWS naming rules.
+    ///
+    /// Bucket names must:
+    /// - Be between 3 and 63 characters
+    /// - Contain only lowercase letters, numbers, hyphens, and periods
+    /// - Start and end with a letter or number
+    /// - Not contain consecutive periods or adjacent period and hyphen
+    fn is_valid_bucket_name(name: &str) -> bool {
+        let len = name.len();
+        if !(3..=63).contains(&len) {
+            return false;
+        }
+
+        let chars: Vec<char> = name.chars().collect();
+
+        // Must start and end with alphanumeric
+        if !chars[0].is_ascii_alphanumeric() || !chars[len - 1].is_ascii_alphanumeric() {
+            return false;
+        }
+
+        // Check all characters and patterns
+        for (i, c) in chars.iter().enumerate() {
+            // Only allow lowercase alphanumeric, hyphen, and period
+            if !c.is_ascii_lowercase() && !c.is_ascii_digit() && *c != '-' && *c != '.' {
+                return false;
+            }
+
+            // Check for consecutive periods or period-hyphen adjacency
+            if i > 0 {
+                let prev = chars[i - 1];
+                let invalid_combo = matches!((*c, prev), ('.' | '-', '.') | ('.', '-'));
+                if invalid_combo {
+                    return false;
+                }
+            }
+        }
+
+        // Must not look like an IP address
+        if name.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            return false;
+        }
+
+        true
+    }
+
+    /// Validate endpoint URL to prevent SSRF attacks.
+    ///
+    /// Blocks:
+    /// - Non-http(s) schemes
+    /// - Localhost addresses
+    /// - Private IP ranges (10.x, 172.16-31.x, 192.168.x, 169.254.x)
+    /// - IPv6 localhost and link-local
+    fn validate_endpoint(endpoint: &str) -> Result<()> {
+        // Parse the URL
+        let url = url::Url::parse(endpoint).map_err(|e| {
+            CratonsError::Config(format!("Invalid endpoint URL '{}': {}", endpoint, e))
+        })?;
+
+        // SECURITY: Only allow http and https schemes
+        match url.scheme() {
+            "http" | "https" => {}
+            scheme => {
+                return Err(CratonsError::Config(format!(
+                    "Invalid URL scheme '{}': only http and https are allowed",
+                    scheme
+                )));
+            }
+        }
+
+        // SECURITY: Check for localhost and private IPs
+        if let Some(host) = url.host_str() {
+            let host_lower = host.to_lowercase();
+
+            // Block localhost variants
+            if host_lower == "localhost"
+                || host_lower == "127.0.0.1"
+                || host_lower == "::1"
+                || host_lower == "[::1]"
+                || host_lower.starts_with("127.")
+            {
+                return Err(CratonsError::Config(format!(
+                    "SSRF protection: localhost endpoints are not allowed: {}",
+                    host
+                )));
+            }
+
+            // Block metadata service endpoints (AWS, GCP, Azure)
+            if host_lower == "169.254.169.254"
+                || host_lower == "metadata.google.internal"
+                || host_lower.ends_with(".metadata.google.internal")
+            {
+                return Err(CratonsError::Config(format!(
+                    "SSRF protection: cloud metadata endpoints are not allowed: {}",
+                    host
+                )));
+            }
+
+            // Check for private IP ranges if it looks like an IP
+            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                if Self::is_private_ip(&ip) {
+                    return Err(CratonsError::Config(format!(
+                        "SSRF protection: private IP addresses are not allowed: {}",
+                        ip
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if an IP address is in a private/reserved range.
+    fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+        match ip {
+            std::net::IpAddr::V4(ipv4) => {
+                let octets = ipv4.octets();
+                // 10.0.0.0/8
+                if octets[0] == 10 {
+                    return true;
+                }
+                // 172.16.0.0/12
+                if octets[0] == 172 && (16..=31).contains(&octets[1]) {
+                    return true;
+                }
+                // 192.168.0.0/16
+                if octets[0] == 192 && octets[1] == 168 {
+                    return true;
+                }
+                // 169.254.0.0/16 (link-local)
+                if octets[0] == 169 && octets[1] == 254 {
+                    return true;
+                }
+                // 127.0.0.0/8 (loopback)
+                if octets[0] == 127 {
+                    return true;
+                }
+                false
+            }
+            std::net::IpAddr::V6(ipv6) => {
+                // ::1 (loopback)
+                if ipv6.is_loopback() {
+                    return true;
+                }
+                // fe80::/10 (link-local)
+                let segments = ipv6.segments();
+                if (segments[0] & 0xffc0) == 0xfe80 {
+                    return true;
+                }
+                // fc00::/7 (unique local addresses)
+                if (segments[0] & 0xfe00) == 0xfc00 {
+                    return true;
+                }
+                false
+            }
         }
     }
 
@@ -344,7 +519,7 @@ impl S3Backend {
 impl RemoteCacheBackend for S3Backend {
     async fn exists(&self, input_hash: &ContentHash) -> Result<bool> {
         let key = self.manifest_key(input_hash);
-        let url = self.object_url(&key);
+        let url = self.object_url(&key)?;
 
         let headers = self.sign_request("HEAD", &url, &[], None)?;
 
@@ -369,7 +544,7 @@ impl RemoteCacheBackend for S3Backend {
 
         // Download manifest
         let manifest_key = self.manifest_key(input_hash);
-        let manifest_url = self.object_url(&manifest_key);
+        let manifest_url = self.object_url(&manifest_key)?;
 
         let headers = self.sign_request("GET", &manifest_url, &[], None)?;
 
@@ -397,7 +572,7 @@ impl RemoteCacheBackend for S3Backend {
 
         // Download artifact archive
         let artifact_key = self.artifact_key(input_hash);
-        let artifact_url = self.object_url(&artifact_key);
+        let artifact_url = self.object_url(&artifact_key)?;
         let headers = self.sign_request("GET", &artifact_url, &[], None)?;
 
         let mut req = self.client.get(&artifact_url);
@@ -476,7 +651,7 @@ impl RemoteCacheBackend for S3Backend {
 
         // Upload artifact archive
         let artifact_key = self.artifact_key(&artifact.manifest.input_hash);
-        let artifact_url = self.object_url(&artifact_key);
+        let artifact_url = self.object_url(&artifact_key)?;
         let headers = self.sign_request(
             "PUT",
             &artifact_url,
@@ -505,7 +680,7 @@ impl RemoteCacheBackend for S3Backend {
         let manifest_json = serde_json::to_vec_pretty(&artifact.manifest)?;
 
         let manifest_key = self.manifest_key(&artifact.manifest.input_hash);
-        let manifest_url = self.object_url(&manifest_key);
+        let manifest_url = self.object_url(&manifest_key)?;
         let headers = self.sign_request(
             "PUT",
             &manifest_url,
@@ -824,6 +999,12 @@ impl RemoteCache {
 
     /// Try to fetch an artifact from remote caches.
     /// Returns the local path if found and downloaded, or None.
+    ///
+    /// # Security
+    ///
+    /// After downloading, the artifact manifest is verified to ensure the
+    /// `input_hash` matches what was requested. This prevents a malicious
+    /// remote cache from serving incorrect artifacts.
     pub async fn fetch(&self, input_hash: &ContentHash) -> Result<Option<PathBuf>> {
         // Check local first
         if let Some(path) = self.local_artifacts.get(input_hash) {
@@ -841,12 +1022,29 @@ impl RemoteCache {
 
             match backend.download(input_hash, &dest).await {
                 Ok(true) => {
-                    info!(
-                        "Downloaded artifact {} from {} backend",
-                        input_hash.short(),
-                        backend.name()
-                    );
-                    return Ok(Some(dest));
+                    // SECURITY: Verify the downloaded artifact's hash matches what we requested
+                    match Self::verify_downloaded_artifact(&dest, input_hash) {
+                        Ok(()) => {
+                            info!(
+                                "Downloaded and verified artifact {} from {} backend",
+                                input_hash.short(),
+                                backend.name()
+                            );
+                            return Ok(Some(dest));
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Downloaded artifact {} from {} failed verification: {}",
+                                input_hash.short(),
+                                backend.name(),
+                                e
+                            );
+                            // Clean up the untrusted artifact
+                            let _ = fs::remove_dir_all(&dest);
+                            // Continue to try other backends
+                            continue;
+                        }
+                    }
                 }
                 Ok(false) => {
                     debug!(
@@ -866,6 +1064,61 @@ impl RemoteCache {
         }
 
         Ok(None)
+    }
+
+    /// Verify a downloaded artifact matches the expected hash.
+    ///
+    /// This checks that the manifest's input_hash matches what we requested,
+    /// preventing a malicious remote cache from serving incorrect artifacts.
+    fn verify_downloaded_artifact(path: &Path, expected_hash: &ContentHash) -> Result<()> {
+        let manifest_path = path.join("cratons-manifest.json");
+
+        if !manifest_path.exists() {
+            return Err(CratonsError::ChecksumMismatch {
+                package: path.display().to_string(),
+                expected: expected_hash.value.clone(),
+                actual: "manifest not found".to_string(),
+            });
+        }
+
+        let manifest_content = fs::read_to_string(&manifest_path)?;
+        let manifest: crate::artifact::ArtifactManifest =
+            serde_json::from_str(&manifest_content).map_err(|e| {
+                CratonsError::ChecksumMismatch {
+                    package: path.display().to_string(),
+                    expected: expected_hash.value.clone(),
+                    actual: format!("invalid manifest: {}", e),
+                }
+            })?;
+
+        // Verify the input hash matches
+        if manifest.input_hash.value != expected_hash.value {
+            return Err(CratonsError::ChecksumMismatch {
+                package: format!("{}@{}", manifest.package, manifest.version),
+                expected: expected_hash.value.clone(),
+                actual: manifest.input_hash.value.clone(),
+            });
+        }
+
+        // Verify hash algorithm matches
+        if manifest.input_hash.algorithm != expected_hash.algorithm {
+            return Err(CratonsError::ChecksumMismatch {
+                package: format!("{}@{}", manifest.package, manifest.version),
+                expected: format!("{:?}:{}", expected_hash.algorithm, expected_hash.value),
+                actual: format!(
+                    "{:?}:{}",
+                    manifest.input_hash.algorithm, manifest.input_hash.value
+                ),
+            });
+        }
+
+        debug!(
+            "Verified artifact {} integrity: {}",
+            manifest.package,
+            expected_hash.short()
+        );
+
+        Ok(())
     }
 
     /// Push a local artifact to all writable remote caches.
