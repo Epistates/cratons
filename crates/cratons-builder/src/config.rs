@@ -10,7 +10,7 @@
 //! All build configurations SHOULD be validated before execution using
 //! the [`BuildConfig::validate`] method.
 
-use cratons_core::{ContentHash, HashAlgorithm, Hasher, CratonsError, Result};
+use cratons_core::{ContentHash, CratonsError, HashAlgorithm, Hasher, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;

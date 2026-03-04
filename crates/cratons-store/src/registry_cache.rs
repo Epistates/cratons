@@ -17,8 +17,8 @@
 //! └── ...
 //! ```
 
+use cratons_core::{CratonsError, Ecosystem, Result};
 use fs2::FileExt;
-use cratons_core::{Ecosystem, CratonsError, Result};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};

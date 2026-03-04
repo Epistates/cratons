@@ -93,7 +93,10 @@ impl<'a> GarbageCollector<'a> {
                                                 } else {
                                                     stats.artifacts_removed += 1;
                                                     stats.bytes_freed += size;
-                                                    debug!("Removed artifact: {}", entry.path().display());
+                                                    debug!(
+                                                        "Removed artifact: {}",
+                                                        entry.path().display()
+                                                    );
                                                 }
                                             }
                                             Ok(false) => {

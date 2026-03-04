@@ -17,8 +17,7 @@ mod extract;
 mod link;
 mod scripts;
 
-
-use cratons_core::{Ecosystem, CratonsError, Result};
+use cratons_core::{CratonsError, Ecosystem, Result};
 use cratons_environment::Environment;
 use cratons_lockfile::{LockedPackage, Lockfile};
 use cratons_store::Store;

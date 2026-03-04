@@ -15,8 +15,8 @@
 #![warn(missing_docs)]
 
 use chrono::{DateTime, Utc};
+use cratons_core::{ContentHash, CratonsError, Ecosystem, Result};
 use fs2::FileExt;
-use cratons_core::{ContentHash, Ecosystem, CratonsError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -536,7 +536,7 @@ impl Lockfile {
     /// Returns an error if the algorithm is unsupported or the key is invalid.
     pub fn sign(&mut self, private_key: &[u8], algorithm: &str) -> Result<()> {
         use base64::Engine;
-        use ed25519_dalek::{SigningKey, Signer};
+        use ed25519_dalek::{Signer, SigningKey};
 
         // Validate algorithm
         if algorithm != "ed25519" {
@@ -619,7 +619,7 @@ impl Lockfile {
     /// or the key/signature format is invalid.
     pub fn verify_signature(&self, public_key: &[u8]) -> Result<bool> {
         use base64::Engine;
-        use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
         // Check if signature exists
         let sig_data = self.signature.as_ref().ok_or_else(|| {
@@ -649,16 +649,13 @@ impl Lockfile {
         let key_bytes: [u8; 32] = public_key.try_into().map_err(|_| {
             CratonsError::Lockfile("Failed to convert public key to fixed array".to_string())
         })?;
-        let verifying_key = VerifyingKey::from_bytes(&key_bytes).map_err(|e| {
-            CratonsError::Lockfile(format!("Invalid Ed25519 public key: {}", e))
-        })?;
+        let verifying_key = VerifyingKey::from_bytes(&key_bytes)
+            .map_err(|e| CratonsError::Lockfile(format!("Invalid Ed25519 public key: {}", e)))?;
 
         // Decode signature from base64
         let sig_bytes = base64::engine::general_purpose::STANDARD
             .decode(&sig_data.signature)
-            .map_err(|e| {
-                CratonsError::Lockfile(format!("Invalid base64 signature: {}", e))
-            })?;
+            .map_err(|e| CratonsError::Lockfile(format!("Invalid base64 signature: {}", e)))?;
 
         // Parse signature
         let sig_len = sig_bytes.len();
@@ -1610,10 +1607,12 @@ schema-version = 99
         let mut lockfile2 = Lockfile::new(manifest_hash);
         let result = lockfile2.sign(&private_key, "blake3-hmac");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Unsupported signing algorithm"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unsupported signing algorithm")
+        );
     }
 
     /// Test that signing updates the signature timestamp.

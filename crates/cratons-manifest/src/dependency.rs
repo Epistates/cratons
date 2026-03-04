@@ -1,6 +1,6 @@
 //! Dependency specifications.
 
-use cratons_core::{ContentHash, Ecosystem, CratonsError, PackageSpec, Result, VersionReq};
+use cratons_core::{ContentHash, CratonsError, Ecosystem, PackageSpec, Result, VersionReq};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

@@ -26,7 +26,7 @@ pub struct WorkspaceOpts {
 impl WorkspaceOpts {
     pub fn to_filter(&self) -> Result<WorkspaceFilter> {
         let mut filter = WorkspaceFilter::new();
-        
+
         if self.all {
             // Empty filter matches all, unless specific excludes are added (not supported in opts yet)
             // But if 'all' is explicitly set, we might want to ensure we don't accidentally limit if filter is also set?
@@ -76,7 +76,10 @@ pub fn list(json: bool) -> Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&members).into_diagnostic()?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&members).into_diagnostic()?
+        );
     } else {
         println!(
             "{} Found {} workspace members:",
@@ -90,9 +93,9 @@ pub fn list(json: bool) -> Result<()> {
         members.sort_by(|a, b| a.path.cmp(&b.path));
 
         for member in members {
-            let relative_path = pathdiff::diff_paths(&member.path, &workspace.root_path)
-                .unwrap_or(member.path);
-            
+            let relative_path =
+                pathdiff::diff_paths(&member.path, &workspace.root_path).unwrap_or(member.path);
+
             println!(
                 "  {} {} {}",
                 member.manifest.package.name.bold(),
@@ -113,7 +116,7 @@ pub fn graph(dot: bool) -> Result<()> {
     if dot {
         println!("digraph workspace {{");
         println!("  node [shape=box, style=filled, fillcolor=\"#eeeeee\"];");
-        
+
         for member in &workspace.members {
             let name = &member.manifest.package.name;
             // Clean name for ID
@@ -130,14 +133,15 @@ pub fn graph(dot: bool) -> Result<()> {
         println!("}} ");
     } else {
         println!("{} Workspace Graph", "→".blue());
-        
-        let members = workspace.all_topological()
+
+        let members = workspace
+            .all_topological()
             .map_err(|e| miette::miette!("{}", e))?;
 
         for member in members {
             let name = &member.manifest.package.name;
             let deps = workspace.workspace_dependencies_of(name);
-            
+
             println!("  {}", name.cyan());
             for (i, dep) in deps.iter().enumerate() {
                 let is_last = i == deps.len() - 1;

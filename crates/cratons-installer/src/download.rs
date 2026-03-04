@@ -1,14 +1,14 @@
 //! Package downloading with parallel fetch and integrity verification.
 
-use futures::stream::{self, StreamExt};
-use cratons_core::{Ecosystem, CratonsError, Result};
+use crate::download_diagnostics::DownloadDiagnostics;
+use cratons_core::{CratonsError, Ecosystem, Result};
 use cratons_lockfile::LockedPackage;
 use cratons_store::Store;
+use futures::stream::{self, StreamExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, info};
-use crate::download_diagnostics::DownloadDiagnostics;
 
 /// Downloads packages from registries with parallel fetch support.
 pub struct PackageDownloader {

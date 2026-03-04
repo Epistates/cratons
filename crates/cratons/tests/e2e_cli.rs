@@ -34,11 +34,7 @@ fn test_init_creates_manifest() {
         .output()
         .expect("Failed to execute cratons init");
 
-    assert!(
-        output.status.success(),
-        "cratons init failed: {:?}",
-        output
-    );
+    assert!(output.status.success(), "cratons init failed: {:?}", output);
 
     let manifest_path = project_dir.join("cratons.toml");
     assert!(manifest_path.exists(), "cratons.toml was not created");

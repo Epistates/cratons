@@ -9,7 +9,10 @@
 //! to prevent SSRF attacks. See [`cratons_core::validation`] for details.
 
 use async_trait::async_trait;
-use cratons_core::{Ecosystem, CratonsError, Result, validate_package_name, validate_version, normalize_checksum_format};
+use cratons_core::{
+    CratonsError, Ecosystem, Result, normalize_checksum_format, validate_package_name,
+    validate_version,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use tracing::{debug, instrument, warn};
@@ -243,7 +246,10 @@ impl RegistryClient for NpmClient {
             match normalize_checksum_format(&npm_meta.dist.integrity) {
                 Ok(normalized) => normalized,
                 Err(e) => {
-                    warn!("Failed to normalize npm integrity for {}@{}: {}", name, version, e);
+                    warn!(
+                        "Failed to normalize npm integrity for {}@{}: {}",
+                        name, version, e
+                    );
                     npm_meta.dist.integrity.clone()
                 }
             }
@@ -252,7 +258,10 @@ impl RegistryClient for NpmClient {
             match normalize_checksum_format(&format!("sha1-{}", npm_meta.dist.shasum)) {
                 Ok(normalized) => normalized,
                 Err(e) => {
-                    warn!("Failed to normalize npm shasum for {}@{}: {}", name, version, e);
+                    warn!(
+                        "Failed to normalize npm shasum for {}@{}: {}",
+                        name, version, e
+                    );
                     format!("sha1-{}", npm_meta.dist.shasum)
                 }
             }

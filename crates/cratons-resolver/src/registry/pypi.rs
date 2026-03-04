@@ -12,7 +12,7 @@
 //! to prevent SSRF attacks. See [`cratons_core::validation`] for details.
 
 use async_trait::async_trait;
-use cratons_core::{Ecosystem, CratonsError, Result, validate_package_name, validate_version};
+use cratons_core::{CratonsError, Ecosystem, Result, validate_package_name, validate_version};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::str::FromStr;

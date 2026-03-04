@@ -3,7 +3,7 @@
 //! Provides mock registries, remote caches, and WireMock helpers for
 //! testing network interactions without hitting real services.
 
-use cratons_core::{ContentHash, Ecosystem, CratonsError, Result};
+use cratons_core::{ContentHash, CratonsError, Ecosystem, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use wiremock::{

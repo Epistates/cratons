@@ -72,9 +72,7 @@ impl std::str::FromStr for HashAlgorithm {
             "sha256" | "sha-256" => Ok(Self::Sha256),
             "sha512" | "sha-512" => Ok(Self::Sha512),
             "blake3" => Ok(Self::Blake3),
-            _ => Err(CratonsError::InvalidHash(format!(
-                "Unknown algorithm: {s}"
-            ))),
+            _ => Err(CratonsError::InvalidHash(format!("Unknown algorithm: {s}"))),
         }
     }
 }

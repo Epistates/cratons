@@ -9,7 +9,7 @@
 //! to prevent SSRF attacks. See [`cratons_core::validation`] for details.
 
 use async_trait::async_trait;
-use cratons_core::{Ecosystem, CratonsError, Result, validate_package_name, validate_version};
+use cratons_core::{CratonsError, Ecosystem, Result, validate_package_name, validate_version};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use tracing::{debug, instrument};
@@ -244,7 +244,10 @@ impl GoModFile {
     }
 
     /// Parse a single replace directive line.
-    fn parse_replace_line(line: &str, replace_map: &mut BTreeMap<String, (String, Option<String>)>) {
+    fn parse_replace_line(
+        line: &str,
+        replace_map: &mut BTreeMap<String, (String, Option<String>)>,
+    ) {
         // Format: old [version] => new [version]
         // or: old => new [version]
         if let Some((old_part, new_part)) = line.split_once("=>") {

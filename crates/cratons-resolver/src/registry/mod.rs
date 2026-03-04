@@ -33,13 +33,13 @@ pub use npm::NpmClient;
 pub use pypi::PyPiClient;
 
 use async_trait::async_trait;
+use cratons_core::{CratonsError, Ecosystem, Result};
+use cratons_store::{CachedMetadata, RegistryCache};
 use governor::{
     Quota, RateLimiter,
     clock::DefaultClock,
     state::{InMemoryState, NotKeyed},
 };
-use cratons_core::{Ecosystem, CratonsError, Result};
-use cratons_store::{CachedMetadata, RegistryCache};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -514,9 +514,21 @@ fn metadata_to_cached(metadata: &PackageMetadata, ecosystem: Ecosystem) -> Cache
         dist_url: metadata.dist_url.clone(),
         integrity: metadata.integrity.clone(),
         // Convert BTreeMap to HashMap for cache storage
-        dependencies: metadata.dependencies.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        optional_dependencies: metadata.optional_dependencies.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        peer_dependencies: metadata.peer_dependencies.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        dependencies: metadata
+            .dependencies
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        optional_dependencies: metadata
+            .optional_dependencies
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        peer_dependencies: metadata
+            .peer_dependencies
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
         peer_dependencies_meta: metadata
             .peer_dependencies_meta
             .iter()
@@ -529,7 +541,11 @@ fn metadata_to_cached(metadata: &PackageMetadata, ecosystem: Ecosystem) -> Cache
                 )
             })
             .collect(),
-        dev_dependencies: metadata.dev_dependencies.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        dev_dependencies: metadata
+            .dev_dependencies
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
         bundled_dependencies: metadata.bundled_dependencies.clone(),
         features: metadata.features.clone(),
         cached_at: std::time::SystemTime::now()

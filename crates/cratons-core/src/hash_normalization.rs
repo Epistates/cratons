@@ -50,7 +50,9 @@ fn normalize_algorithm(algo: &str, value: &str, expected_bytes: usize) -> Result
 
     Err(CratonsError::InvalidHash(format!(
         "Invalid {} checksum value: '{}'. Expected {} hex chars or valid base64",
-        algo, value, expected_bytes * 2
+        algo,
+        value,
+        expected_bytes * 2
     )))
 }
 

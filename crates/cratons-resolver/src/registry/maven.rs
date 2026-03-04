@@ -16,7 +16,7 @@
 //! extract the specific elements we need without using a full XML parser.
 
 use async_trait::async_trait;
-use cratons_core::{Ecosystem, CratonsError, Result, validate_package_name, validate_version};
+use cratons_core::{CratonsError, Ecosystem, Result, validate_package_name, validate_version};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use tracing::{debug, instrument};

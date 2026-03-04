@@ -9,7 +9,10 @@
 //! to prevent SSRF attacks. See [`cratons_core::validation`] for details.
 
 use async_trait::async_trait;
-use cratons_core::{Ecosystem, CratonsError, Result, validate_package_name, validate_version, normalize_checksum_format};
+use cratons_core::{
+    CratonsError, Ecosystem, Result, normalize_checksum_format, validate_package_name,
+    validate_version,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use tracing::{debug, instrument};
@@ -383,10 +386,7 @@ impl RegistryClient for CratesIoClient {
             .client
             .get(&url)
             .header("Accept", "application/json")
-            .header(
-                "User-Agent",
-                concat!("cratons/", env!("CARGO_PKG_VERSION")),
-            )
+            .header("User-Agent", concat!("cratons/", env!("CARGO_PKG_VERSION")))
             .send()
             .await
             .map_err(|e| CratonsError::Network(format!("Search failed: {}", e)))?;

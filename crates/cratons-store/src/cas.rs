@@ -1,7 +1,7 @@
 //! Content-addressable file storage.
 
+use cratons_core::{ContentHash, CratonsError, HashAlgorithm, Hasher, Result};
 use fs2::FileExt;
-use cratons_core::{ContentHash, HashAlgorithm, Hasher, CratonsError, Result};
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};

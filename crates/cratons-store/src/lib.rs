@@ -105,11 +105,9 @@ impl Store {
 
     /// Get the default store root directory.
     pub fn default_root() -> Result<PathBuf> {
-        dirs::home_dir()
-            .map(|h| h.join(".cratons"))
-            .ok_or_else(|| {
-                cratons_core::CratonsError::Config("Could not determine home directory".into())
-            })
+        dirs::home_dir().map(|h| h.join(".cratons")).ok_or_else(|| {
+            cratons_core::CratonsError::Config("Could not determine home directory".into())
+        })
     }
 
     /// Get the store root directory.

@@ -15,7 +15,6 @@ pub mod mvs;
 pub mod registry;
 pub mod sat;
 
-
 pub use graph::{DependencyEdge, DependencyGraph, DependencyKind};
 pub use markers::{MarkerEvaluator, ParsedPythonDep, PythonEnvironmentConfig};
 pub use mvs::Resolver;
@@ -88,11 +87,21 @@ pub fn compute_manifest_hash(manifest: &Manifest) -> ContentHash {
 
     // Environment
     hash_input.push_str("environment:\n");
-    if let Some(v) = &manifest.environment.node { hash_input.push_str(&format!("node:{}\n", v)); }
-    if let Some(v) = &manifest.environment.python { hash_input.push_str(&format!("python:{}\n", v)); }
-    if let Some(v) = &manifest.environment.rust { hash_input.push_str(&format!("rust:{}\n", v)); }
-    if let Some(v) = &manifest.environment.go { hash_input.push_str(&format!("go:{}\n", v)); }
-    if let Some(v) = &manifest.environment.java { hash_input.push_str(&format!("java:{}\n", v)); }
+    if let Some(v) = &manifest.environment.node {
+        hash_input.push_str(&format!("node:{}\n", v));
+    }
+    if let Some(v) = &manifest.environment.python {
+        hash_input.push_str(&format!("python:{}\n", v));
+    }
+    if let Some(v) = &manifest.environment.rust {
+        hash_input.push_str(&format!("rust:{}\n", v));
+    }
+    if let Some(v) = &manifest.environment.go {
+        hash_input.push_str(&format!("go:{}\n", v));
+    }
+    if let Some(v) = &manifest.environment.java {
+        hash_input.push_str(&format!("java:{}\n", v));
+    }
 
     hash_input.push_str("system:\n");
     for sys in &manifest.environment.system {

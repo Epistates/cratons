@@ -5,7 +5,7 @@
 //! resolution graph, leveraging `pubgrub`'s generic solver.
 
 use crate::registry::Registry;
-use cratons_core::{Ecosystem, CratonsError, ResolutionStrategy, Result};
+use cratons_core::{CratonsError, Ecosystem, ResolutionStrategy, Result};
 use pubgrub::range::Range;
 use pubgrub::solver::{Dependencies, DependencyConstraints, DependencyProvider, resolve};
 use pubgrub::version::Version;

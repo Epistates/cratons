@@ -290,27 +290,27 @@ const BLOCKED_ENV_VARS: &[&str] = &[
     "DYLD_IMAGE_SUFFIX",
     "DYLD_PRINT_TO_FILE",
     // Glibc exploitation vectors
-    "GCONV_PATH",           // Character conversion path hijacking
-    "MALLOC_CHECK_",        // Memory allocation debugging - can leak info
-    "MALLOC_TRACE",         // Memory allocation tracing - can write files
-    "GLIBC_TUNABLES",       // Glibc tuning - various exploits
-    "HOSTALIASES",          // Hostname resolution hijacking
-    "LOCALDOMAIN",          // DNS domain hijacking
-    "RES_OPTIONS",          // Resolver options manipulation
-    "RESOLV_HOST_CONF",     // Resolver config hijacking
+    "GCONV_PATH",       // Character conversion path hijacking
+    "MALLOC_CHECK_",    // Memory allocation debugging - can leak info
+    "MALLOC_TRACE",     // Memory allocation tracing - can write files
+    "GLIBC_TUNABLES",   // Glibc tuning - various exploits
+    "HOSTALIASES",      // Hostname resolution hijacking
+    "LOCALDOMAIN",      // DNS domain hijacking
+    "RES_OPTIONS",      // Resolver options manipulation
+    "RESOLV_HOST_CONF", // Resolver config hijacking
     // Locale/internationalization hijacking
-    "NLSPATH",              // Message catalog path hijacking
-    "LOCPATH",              // Locale data path hijacking
-    "LANGUAGE",             // Locale fallback chain
-    "LC_ALL",               // Can override all locale settings
+    "NLSPATH",  // Message catalog path hijacking
+    "LOCPATH",  // Locale data path hijacking
+    "LANGUAGE", // Locale fallback chain
+    "LC_ALL",   // Can override all locale settings
     // Terminal/filesystem path hijacking
-    "TERMINFO",             // Terminal info database path
-    "TERMINFO_DIRS",        // Terminal info search dirs
-    "TERMCAP",              // Terminal capabilities database
-    "TZDIR",                // Timezone directory hijacking
-    "TMPDIR",               // Temporary directory (can redirect writes)
-    "TMP",                  // Temporary directory (Windows compat)
-    "TEMP",                 // Temporary directory (Windows compat)
+    "TERMINFO",      // Terminal info database path
+    "TERMINFO_DIRS", // Terminal info search dirs
+    "TERMCAP",       // Terminal capabilities database
+    "TZDIR",         // Timezone directory hijacking
+    "TMPDIR",        // Temporary directory (can redirect writes)
+    "TMP",           // Temporary directory (Windows compat)
+    "TEMP",          // Temporary directory (Windows compat)
     // Code injection - scripting languages
     "PYTHONSTARTUP",
     "PYTHONPATH",
@@ -333,14 +333,14 @@ const BLOCKED_ENV_VARS: &[&str] = &[
     // Shell and privilege escalation
     "SHELL",
     "BASH_ENV",
-    "ENV",                  // POSIX shell startup file
-    "CDPATH",               // Can redirect cd commands
-    "GLOBIGNORE",           // Affects glob expansion
-    "SHELLOPTS",            // Shell options
-    "BASHOPTS",             // Bash options
-    "PS4",                  // Debug prompt - can execute code
-    "PROMPT_COMMAND",       // Bash prompt hook - code execution
-    "IFS",                  // Internal field separator manipulation
+    "ENV",            // POSIX shell startup file
+    "CDPATH",         // Can redirect cd commands
+    "GLOBIGNORE",     // Affects glob expansion
+    "SHELLOPTS",      // Shell options
+    "BASHOPTS",       // Bash options
+    "PS4",            // Debug prompt - can execute code
+    "PROMPT_COMMAND", // Bash prompt hook - code execution
+    "IFS",            // Internal field separator manipulation
     // Sudo/privilege context
     "SUDO_COMMAND",
     "SUDO_USER",
@@ -365,13 +365,13 @@ const BLOCKED_ENV_VARS: &[&str] = &[
     "GIT_EXEC_PATH",
     "GIT_TEMPLATE_DIR",
     // Miscellaneous dangerous vars
-    "LD_PROFILE",           // Can write profiling data
-    "EDITOR",               // Could be exploited in some contexts
-    "VISUAL",               // Alternative editor variable
-    "PAGER",                // Pager command execution
-    "BROWSER",              // Browser command execution
-    "LESSOPEN",             // Less preprocessor - code execution
-    "LESSCLOSE",            // Less postprocessor - code execution
+    "LD_PROFILE", // Can write profiling data
+    "EDITOR",     // Could be exploited in some contexts
+    "VISUAL",     // Alternative editor variable
+    "PAGER",      // Pager command execution
+    "BROWSER",    // Browser command execution
+    "LESSOPEN",   // Less preprocessor - code execution
+    "LESSCLOSE",  // Less postprocessor - code execution
 ];
 
 /// Check if an environment variable is safe to pass to sandboxed processes.

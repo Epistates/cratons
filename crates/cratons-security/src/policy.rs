@@ -281,10 +281,7 @@ namespace Cratons {
 
             let entities =
                 Entities::from_entities(vec![entity], Some(&self.schema)).map_err(|e| {
-                    cratons_core::CratonsError::Config(format!(
-                        "Failed to create entities: {}",
-                        e
-                    ))
+                    cratons_core::CratonsError::Config(format!("Failed to create entities: {}", e))
                 })?;
 
             // 3. Make Request

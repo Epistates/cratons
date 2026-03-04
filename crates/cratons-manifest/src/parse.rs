@@ -1,6 +1,6 @@
 //! Manifest parsing.
 
-use cratons_core::{Ecosystem, CratonsError, ResolutionStrategy, Result};
+use cratons_core::{CratonsError, Ecosystem, ResolutionStrategy, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;

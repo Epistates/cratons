@@ -482,8 +482,7 @@ impl ToolchainVerifier {
                     "Signature verification required (min_security_level={}), \
                      but signature data was not provided. Signature URL: {}. \
                      Use verify_best_with_signatures() to fetch and verify signatures.",
-                    self.min_security_level,
-                    sig_url
+                    self.min_security_level, sig_url
                 )));
             }
         }
@@ -555,8 +554,15 @@ impl ToolchainVerifier {
         // Try signature verification first (higher security level)
         if let Some(sig_data) = signature {
             match sig_data {
-                SignatureData::Sigstore { bundle_json, identity, issuer } => {
-                    match self.verify_sigstore(data, bundle_json, identity, issuer).await {
+                SignatureData::Sigstore {
+                    bundle_json,
+                    identity,
+                    issuer,
+                } => {
+                    match self
+                        .verify_sigstore(data, bundle_json, identity, issuer)
+                        .await
+                    {
                         Ok(result) => {
                             info!(
                                 ecosystem = %ecosystem,
@@ -574,7 +580,10 @@ impl ToolchainVerifier {
                         }
                     }
                 }
-                SignatureData::Gpg { signature_armor, public_keys } => {
+                SignatureData::Gpg {
+                    signature_armor,
+                    public_keys,
+                } => {
                     let keys_refs: Vec<&str> = public_keys.iter().map(|s| s.as_str()).collect();
                     match self.verify_gpg_any_key(data, signature_armor, &keys_refs) {
                         Ok(result) => {
@@ -594,25 +603,26 @@ impl ToolchainVerifier {
                         }
                     }
                 }
-                SignatureData::Minisign { signature_str, public_key } => {
-                    match self.verify_minisign(data, signature_str, public_key) {
-                        Ok(result) => {
-                            info!(
-                                ecosystem = %ecosystem,
-                                method = "minisign",
-                                "Signature verification successful"
-                            );
-                            return Ok(result);
-                        }
-                        Err(e) => {
-                            warn!(
-                                ecosystem = %ecosystem,
-                                error = %e,
-                                "Minisign verification failed, checking fallback options"
-                            );
-                        }
+                SignatureData::Minisign {
+                    signature_str,
+                    public_key,
+                } => match self.verify_minisign(data, signature_str, public_key) {
+                    Ok(result) => {
+                        info!(
+                            ecosystem = %ecosystem,
+                            method = "minisign",
+                            "Signature verification successful"
+                        );
+                        return Ok(result);
                     }
-                }
+                    Err(e) => {
+                        warn!(
+                            ecosystem = %ecosystem,
+                            error = %e,
+                            "Minisign verification failed, checking fallback options"
+                        );
+                    }
+                },
             }
 
             // SECURITY: If signature was provided but verification failed,

@@ -6,9 +6,9 @@
 //! - Symlink attacks
 //! - Dangerous file permissions (SUID/SGID)
 
-use flate2::read::GzDecoder;
-use cratons_core::{Ecosystem, CratonsError, Result};
+use cratons_core::{CratonsError, Ecosystem, Result};
 use cratons_store::Store;
+use flate2::read::GzDecoder;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read};
 use std::path::{Component, Path, PathBuf};

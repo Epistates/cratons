@@ -633,8 +633,7 @@ impl RemoteCacheBackend for S3Backend {
                     .strip_prefix(&artifact.path)
                     .map_err(|e| CratonsError::Io(std::io::Error::other(e.to_string())))?;
 
-                if relative.as_os_str().is_empty()
-                    || relative == Path::new("cratons-manifest.json")
+                if relative.as_os_str().is_empty() || relative == Path::new("cratons-manifest.json")
                 {
                     continue;
                 }
@@ -1082,14 +1081,14 @@ impl RemoteCache {
         }
 
         let manifest_content = fs::read_to_string(&manifest_path)?;
-        let manifest: crate::artifact::ArtifactManifest =
-            serde_json::from_str(&manifest_content).map_err(|e| {
-                CratonsError::ChecksumMismatch {
-                    package: path.display().to_string(),
-                    expected: expected_hash.value.clone(),
-                    actual: format!("invalid manifest: {}", e),
-                }
-            })?;
+        let manifest: crate::artifact::ArtifactManifest = serde_json::from_str(&manifest_content)
+            .map_err(|e| {
+            CratonsError::ChecksumMismatch {
+                package: path.display().to_string(),
+                expected: expected_hash.value.clone(),
+                actual: format!("invalid manifest: {}", e),
+            }
+        })?;
 
         // Verify the input hash matches
         if manifest.input_hash.value != expected_hash.value {

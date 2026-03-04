@@ -6,13 +6,13 @@
 //! - Dependency resolution from manifest
 //! - TOML serialization
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use cratons_benchmarks::{
     generate_complex_manifest, generate_large_manifest, generate_manifest_toml,
     generate_medium_manifest, generate_small_manifest,
 };
 use cratons_core::Ecosystem;
 use cratons_manifest::{Dependencies, Dependency, Manifest};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::fs;
 use tempfile::NamedTempFile;
 

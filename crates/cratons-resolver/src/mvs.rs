@@ -1,8 +1,7 @@
 //! Minimal Version Selection algorithm.
 
 use cratons_core::{
-    Ecosystem, HashAlgorithm, Hasher, CratonsError, ResolutionStrategy, Result, Version,
-    VersionReq,
+    CratonsError, Ecosystem, HashAlgorithm, Hasher, ResolutionStrategy, Result, Version, VersionReq,
 };
 use cratons_lockfile::{LOCKFILE_NAME, Lockfile};
 use cratons_manifest::Manifest;

@@ -39,8 +39,14 @@ const CLONE_NEWCGROUP: u64 = 0x0200_0000;
 const CLONE_NEWTIME: u64 = 0x0000_0080;
 
 /// All dangerous clone flags that allow namespace escape
-const CLONE_DANGEROUS_FLAGS: u64 =
-    CLONE_NEWNS | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWCGROUP | CLONE_NEWTIME;
+const CLONE_DANGEROUS_FLAGS: u64 = CLONE_NEWNS
+    | CLONE_NEWUSER
+    | CLONE_NEWPID
+    | CLONE_NEWNET
+    | CLONE_NEWUTS
+    | CLONE_NEWIPC
+    | CLONE_NEWCGROUP
+    | CLONE_NEWTIME;
 
 /// Create a default seccomp profile for build operations.
 ///

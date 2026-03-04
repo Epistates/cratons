@@ -6,10 +6,10 @@
 //! - Artifact store operations
 //! - Blake3 hashing performance
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use cratons_benchmarks::{FileSizes, generate_random_content};
 use cratons_core::{ContentHash, HashAlgorithm, Hasher};
 use cratons_store::{ContentAddressableStore, Store};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::fs;
 use tempfile::TempDir;
 

@@ -218,9 +218,7 @@ impl OciSpecGenerator {
             // Ambient (automatically gained)
             .ambient(Vec::<Capability>::new())
             .build()
-            .map_err(|e| {
-                CratonsError::Container(format!("failed to build capabilities: {}", e))
-            })?;
+            .map_err(|e| CratonsError::Container(format!("failed to build capabilities: {}", e)))?;
 
         Ok(caps)
     }
@@ -328,8 +326,7 @@ impl OciSpecGenerator {
         ];
         for pattern in suspicious_patterns {
             // Check both the original and canonical paths
-            if canonical_str.starts_with(pattern)
-                || canonical_str == pattern.trim_end_matches('/')
+            if canonical_str.starts_with(pattern) || canonical_str == pattern.trim_end_matches('/')
             {
                 return Err(CratonsError::Container(format!(
                     "mount {} references sensitive path '{}': {} (resolved to: {})",

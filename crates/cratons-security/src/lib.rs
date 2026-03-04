@@ -23,7 +23,7 @@
 
 pub mod policy;
 
-use cratons_core::{Ecosystem, CratonsError, Result};
+use cratons_core::{CratonsError, Ecosystem, Result};
 use cratons_lockfile::Lockfile;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};

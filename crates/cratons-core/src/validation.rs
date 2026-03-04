@@ -33,7 +33,7 @@ use regex::Regex;
 use std::path::Path;
 use std::sync::LazyLock;
 
-use crate::{Ecosystem, CratonsError, Result};
+use crate::{CratonsError, Ecosystem, Result};
 
 /// Maximum length for package names (prevents DoS via huge names).
 pub const MAX_PACKAGE_NAME_LENGTH: usize = 214; // npm limit
@@ -339,21 +339,18 @@ pub fn validate_path_component(component: &str) -> Result<()> {
 /// the base directory.
 pub fn validate_path_within_base(path: &Path, base: &Path) -> Result<std::path::PathBuf> {
     // Canonicalize both paths to resolve symlinks and relative components
-    let canonical_base = base
-        .canonicalize()
-        .map_err(|e| CratonsError::InvalidPath {
-            path: base.display().to_string(),
-            message: format!("failed to canonicalize base path: {e}"),
-        })?;
+    let canonical_base = base.canonicalize().map_err(|e| CratonsError::InvalidPath {
+        path: base.display().to_string(),
+        message: format!("failed to canonicalize base path: {e}"),
+    })?;
 
     // For the target path, we need to handle the case where it doesn't exist yet
     // We canonicalize the parent and then append the filename
     let canonical_path = if path.exists() {
-        path.canonicalize()
-            .map_err(|e| CratonsError::InvalidPath {
-                path: path.display().to_string(),
-                message: format!("failed to canonicalize path: {e}"),
-            })?
+        path.canonicalize().map_err(|e| CratonsError::InvalidPath {
+            path: path.display().to_string(),
+            message: format!("failed to canonicalize path: {e}"),
+        })?
     } else {
         // Path doesn't exist - canonicalize parent and append filename
         let parent = path.parent().ok_or_else(|| CratonsError::InvalidPath {

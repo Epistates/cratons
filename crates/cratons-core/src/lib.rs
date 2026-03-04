@@ -23,7 +23,7 @@ pub mod validation;
 pub mod version;
 
 pub use ecosystem::{Ecosystem, ResolutionStrategy};
-pub use error::{IoError, CratonsError, Result};
+pub use error::{CratonsError, IoError, Result};
 pub use events::BuildEvent;
 pub use hash::{ContentHash, HashAlgorithm, Hasher};
 pub use hash_normalization::normalize_checksum_format;

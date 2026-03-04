@@ -68,7 +68,10 @@ impl DownloadDiagnostics {
         if len < 1000 && self.looks_like_json(bytes) {
             let json_preview = self.safe_utf8_preview(bytes, 200);
             return Err(self.error(
-                &format!("Received JSON error instead of package archive: {}", json_preview),
+                &format!(
+                    "Received JSON error instead of package archive: {}",
+                    json_preview
+                ),
                 "The registry returned a JSON response instead of a binary archive",
             ));
         }
@@ -77,7 +80,10 @@ impl DownloadDiagnostics {
         if self.looks_like_html(bytes) {
             let html_preview = self.safe_utf8_preview(bytes, 100);
             return Err(self.error(
-                &format!("Received HTML error page instead of package archive: {}", html_preview),
+                &format!(
+                    "Received HTML error page instead of package archive: {}",
+                    html_preview
+                ),
                 "The registry returned an HTML page. Check:\n  \
                  - URL is correct\n  \
                  - Package exists\n  \
@@ -123,7 +129,9 @@ impl DownloadDiagnostics {
             return false;
         }
         // Trim leading whitespace
-        let trimmed = bytes.iter().skip_while(|&&b| b == b' ' || b == b'\n' || b == b'\r' || b == b'\t');
+        let trimmed = bytes
+            .iter()
+            .skip_while(|&&b| b == b' ' || b == b'\n' || b == b'\r' || b == b'\t');
         matches!(trimmed.clone().next(), Some(b'{' | b'['))
     }
 
@@ -132,7 +140,11 @@ impl DownloadDiagnostics {
         if bytes.len() < 15 {
             return false;
         }
-        let lower: Vec<u8> = bytes.iter().take(100).map(|b| b.to_ascii_lowercase()).collect();
+        let lower: Vec<u8> = bytes
+            .iter()
+            .take(100)
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
         lower.starts_with(b"<!doctype html")
             || lower.starts_with(b"<html")
             || lower.windows(6).any(|w| w == b"<head>")
@@ -163,7 +175,12 @@ impl DownloadDiagnostics {
 
         if !is_gzip && !is_zip && !is_tar {
             // Not a recognized archive format
-            let hex_preview: String = bytes.iter().take(16).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+            let hex_preview: String = bytes
+                .iter()
+                .take(16)
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
             return Err(self.error(
                 &format!("Invalid archive format. First bytes: {}", hex_preview),
                 "The downloaded file doesn't have valid archive headers. \
@@ -193,7 +210,8 @@ impl DownloadDiagnostics {
             self.request_url,
             self.response_status,
             self.content_type,
-            self.content_length.map_or("not specified".to_string(), |l| l.to_string()),
+            self.content_length
+                .map_or("not specified".to_string(), |l| l.to_string()),
             self.actual_bytes,
             hint
         ))

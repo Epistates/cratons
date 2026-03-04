@@ -7,10 +7,10 @@
 //! - Freshness checking
 //! - Artifact cache operations
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use cratons_benchmarks::{generate_lockfile, generate_lockfile_toml};
 use cratons_core::{ContentHash, Ecosystem};
 use cratons_lockfile::{ArtifactCache, DependencyRef, LockedPackage, Lockfile};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::fs;
 use tempfile::NamedTempFile;
 

@@ -2,16 +2,16 @@
 
 pub mod workspace;
 
-use workspace::WorkspaceOpts;
-use indicatif::{ProgressBar, ProgressStyle};
 use cratons_core::Ecosystem;
 use cratons_installer::{InstallerConfig, LinkStrategy};
 use cratons_lockfile::{LOCKFILE_NAME, Lockfile};
 use cratons_manifest::Manifest;
 use cratons_store::Store;
+use indicatif::{ProgressBar, ProgressStyle};
 use miette::{IntoDiagnostic, Result, WrapErr};
 use owo_colors::OwoColorize;
 use std::path::{Path, PathBuf};
+use workspace::WorkspaceOpts;
 
 /// Initialize a new project.
 pub fn init(path: &str) -> Result<()> {
@@ -820,13 +820,13 @@ async fn build_async(release: bool, no_cache: bool, workspace_opts: WorkspaceOpt
             // Note: Workspace::load(".") only works if . is the root.
             // If we are here, we are at the workspace root.
             // If selected is empty, it means the filter matched nothing.
-            
+
             // However, if no filter was provided (default), we might want to build ALL members?
             // Current WorkspaceOpts logic: empty filter = match all?
             // Let's check WorkspaceOpts::to_filter implementation.
             // It defaults to empty filter which matches all.
             // So if selected is empty, the workspace is empty.
-            
+
             println!("{} No packages to build", "!".yellow());
             return Ok(());
         }
@@ -1177,10 +1177,7 @@ pub fn shell() -> Result<()> {
 
     // Set markers that we're in a cratons environment
     cmd.env("CRATONS_ENV", "1");
-    cmd.env(
-        "CRATONS_ENV_ROOT",
-        project_dir.join(".cratons").join("env"),
-    );
+    cmd.env("CRATONS_ENV_ROOT", project_dir.join(".cratons").join("env"));
 
     // Update PATH to include hermetic bin directories
     if let Ok(current_path) = std::env::var("PATH") {

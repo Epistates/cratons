@@ -3,7 +3,6 @@
 //! Measures performance of the MVS (Minimal Version Selection) algorithm
 //! with various dependency tree sizes and complexities.
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use cratons_benchmarks::{
     create_version_map, generate_complex_manifest, generate_large_manifest,
     generate_medium_manifest, generate_small_manifest,
@@ -11,6 +10,7 @@ use cratons_benchmarks::{
 use cratons_core::{Ecosystem, Version, VersionReq};
 use cratons_manifest::Manifest;
 use cratons_resolver::graph::{DependencyGraph, DependencyKind};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 /// Benchmark dependency graph construction.
 fn bench_graph_construction(c: &mut Criterion) {
