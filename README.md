@@ -2,7 +2,7 @@
 
 A language-agnostic package manager with **hermetic builds**, **content-addressable storage**, and **unified dependency management** across ecosystems. Designed for enterprise scale and security.
 
-## SOTA Features (2025)
+## Features
 
 - **Hybrid Resolver (MVS + SAT)**: Combines the determinism of Minimal Version Selection (Go/Cargo) with the constraint-solving power of **PubGrub** (NPM/Python/Dart), seamlessly resolving dependencies across diverse ecosystems in a single graph.
 - **OCI-Compliant Sandboxing**: Builds run in true, unprivileged containers using `libcontainer` (youki core) with strict **Seccomp** filtering, **Namespace** isolation (User, Pid, Net, Mount), and resource limits.
@@ -12,9 +12,6 @@ A language-agnostic package manager with **hermetic builds**, **content-addressa
     - **Minisign** verification for modern toolchains.
     - TOCTOU-free in-memory artifact verification.
 - **OpenTelemetry Observability**: Built-in OTLP export support for distributed tracing of build pipelines.
-
-## Features
-
 - **Multi-Ecosystem Support**: npm, PyPI, crates.io, Go modules, and Maven Central
 - **Hermetic Builds**: Isolated container-based builds using OCI runtime concepts
 - **Hermetic Environments**: venv-compatible environments that work with existing tools
