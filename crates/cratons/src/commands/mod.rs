@@ -2127,6 +2127,148 @@ pub fn store_remove(hash: &str) -> Result<()> {
 }
 
 /// Generate shell completions.
+/// List all configuration values with their source and lock status.
+pub fn config_list(json: bool) -> Result<()> {
+    use crate::config::{self, ConfigSource};
+
+    let provenance = config::Config::load_with_provenance();
+
+    if json {
+        let mut entries = serde_json::Map::new();
+        let config_value = serde_json::to_value(&provenance.config).into_diagnostic()?;
+
+        fn flatten_json(
+            value: &serde_json::Value,
+            prefix: &str,
+            out: &mut Vec<(String, serde_json::Value)>,
+        ) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        let key = if prefix.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{}.{}", prefix, k)
+                        };
+                        flatten_json(v, &key, out);
+                    }
+                }
+                _ => {
+                    out.push((prefix.to_string(), value.clone()));
+                }
+            }
+        }
+
+        let mut flat = Vec::new();
+        flatten_json(&config_value, "", &mut flat);
+
+        for (key, value) in flat {
+            let source = provenance
+                .sources
+                .get(&key)
+                .copied()
+                .unwrap_or(ConfigSource::Default);
+            let locked = provenance.locked_keys.contains(&key);
+
+            let mut entry = serde_json::Map::new();
+            entry.insert("value".to_string(), value);
+            entry.insert(
+                "source".to_string(),
+                serde_json::Value::String(source.to_string()),
+            );
+            entry.insert("locked".to_string(), serde_json::Value::Bool(locked));
+
+            entries.insert(key, serde_json::Value::Object(entry));
+        }
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::Value::Object(entries)).into_diagnostic()?
+        );
+    } else {
+        println!("{}", "Configuration".bold());
+        println!();
+
+        let config_value = serde_json::to_value(&provenance.config).into_diagnostic()?;
+
+        fn print_flat(
+            value: &serde_json::Value,
+            prefix: &str,
+            sources: &std::collections::HashMap<String, ConfigSource>,
+            locked: &std::collections::HashSet<String>,
+        ) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        let key = if prefix.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{}.{}", prefix, k)
+                        };
+                        print_flat(v, &key, sources, locked);
+                    }
+                }
+                _ => {
+                    let source = sources
+                        .get(prefix)
+                        .copied()
+                        .unwrap_or(ConfigSource::Default);
+                    let is_locked = locked.contains(prefix);
+
+                    let source_tag = match source {
+                        ConfigSource::Corp => format!("[{}]", "CORP".red().bold()),
+                        ConfigSource::Env => format!("[{}]", "ENV".yellow()),
+                        ConfigSource::Project => format!("[{}]", "PROJECT".blue()),
+                        ConfigSource::User => format!("[{}]", "USER".green()),
+                        ConfigSource::System => format!("[{}]", "SYSTEM".cyan()),
+                        ConfigSource::Default => format!("[{}]", "default".dimmed()),
+                    };
+
+                    let lock_indicator = if is_locked {
+                        format!(" {}", "🔒".to_string())
+                    } else {
+                        String::new()
+                    };
+
+                    let display_value = match value {
+                        serde_json::Value::String(s) => format!("\"{}\"", s),
+                        other => other.to_string(),
+                    };
+
+                    println!(
+                        "  {} {} = {} {}",
+                        source_tag,
+                        prefix.bold(),
+                        display_value,
+                        lock_indicator
+                    );
+                }
+            }
+        }
+
+        print_flat(
+            &config_value,
+            "",
+            &provenance.sources,
+            &provenance.locked_keys,
+        );
+
+        if !provenance.locked_keys.is_empty() {
+            println!();
+            println!(
+                "  {} {} locked by corporate policy",
+                "🔒".to_string(),
+                provenance.locked_keys.len()
+            );
+            if let Some(path) = config::Config::corp_config_path() {
+                println!("  Policy file: {}", path.display().to_string().dimmed());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn completions(shell: clap_complete::Shell) {
     use clap::CommandFactory;
     let mut cmd = super::Cli::command();

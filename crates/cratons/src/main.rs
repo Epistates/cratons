@@ -183,10 +183,27 @@ enum Commands {
         command: CacheCommands,
     },
 
+    /// Manage configuration
+    #[command(name = "config")]
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// List all configuration values with sources
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -393,6 +410,12 @@ fn main() {
                 let _span =
                     info_span!("cmd_cache_config", backend = ?backend, url = ?url, show).entered();
                 commands::cache_config(backend.as_deref(), url.as_deref(), show)
+            }
+        },
+        Commands::Config { command } => match command {
+            ConfigCommands::List { json } => {
+                let _span = info_span!("cmd_config_list", json).entered();
+                commands::config_list(json)
             }
         },
         Commands::Completions { shell } => {
