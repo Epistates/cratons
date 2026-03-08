@@ -90,7 +90,7 @@ pub struct PackageMetadata {
     pub bundled_dependencies: Vec<String>,
     /// Features/extras available (list of feature names)
     pub features: Vec<String>,
-    /// Feature definitions: feature_name -> [enabled_features_or_deps]
+    /// Feature definitions: feature_name -> \[enabled_features_or_deps\]
     /// For Rust crates: maps feature names to what they enable
     /// Example: "full" => ["derive", "parsing", "printing"]
     #[serde(default)]

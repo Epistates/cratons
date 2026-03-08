@@ -22,7 +22,7 @@ use crate::{IsolationLevel, Sandbox};
 /// Sandbox using Apple's `container` tool (based on Virtualization.framework).
 ///
 /// This requires the `container` binary to be in the PATH.
-/// See: https://github.com/apple/container
+/// See: <https://github.com/apple/container>
 pub struct AppleContainerSandbox {
     tool_path: PathBuf,
 }

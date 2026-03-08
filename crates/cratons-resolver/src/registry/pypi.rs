@@ -1,7 +1,7 @@
 //! PyPI Registry Client
 //!
 //! Implements the PyPI JSON API (PEP 691) for fetching package metadata and wheels/sdists.
-//! API Documentation: https://docs.pypi.org/api/json/
+//! API Documentation: <https://docs.pypi.org/api/json/>
 //!
 //! This client supports PEP 508 environment marker evaluation, filtering dependencies
 //! based on the target Python environment (version, platform, etc.).

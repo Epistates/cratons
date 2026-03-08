@@ -1,7 +1,7 @@
 //! npm Registry Client
 //!
 //! Implements the npm registry API for fetching package metadata and tarballs.
-//! API Documentation: https://github.com/npm/registry/blob/main/docs/REGISTRY-API.md
+//! API Documentation: <https://github.com/npm/registry/blob/main/docs/REGISTRY-API.md>
 //!
 //! # Security
 //!

@@ -2257,7 +2257,7 @@ pub fn config_list(json: bool) -> Result<()> {
             println!();
             println!(
                 "  {} {} locked by corporate policy",
-                "🔒".to_string(),
+                "🔒",
                 provenance.locked_keys.len()
             );
             if let Some(path) = config::Config::corp_config_path() {

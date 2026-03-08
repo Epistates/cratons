@@ -1,7 +1,7 @@
 //! Go Module Proxy Client
 //!
 //! Implements the GOPROXY protocol for fetching Go module metadata and source.
-//! Protocol Documentation: https://go.dev/ref/mod#goproxy-protocol
+//! Protocol Documentation: <https://go.dev/ref/mod#goproxy-protocol>
 //!
 //! # Security
 //!

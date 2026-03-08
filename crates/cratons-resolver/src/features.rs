@@ -145,7 +145,7 @@ impl CrateFeatures {
 /// Feature unifier for the dependency graph.
 #[derive(Debug, Default)]
 pub struct FeatureUnifier {
-    /// Feature requests per crate: (name, ecosystem) -> Vec<FeatureRequest>
+    /// Feature requests per crate: (name, ecosystem) -> `Vec<FeatureRequest>`
     requests: BTreeMap<(String, Ecosystem), Vec<FeatureRequest>>,
     /// Crate feature definitions: (name, version, ecosystem) -> CrateFeatures
     crate_features: BTreeMap<(String, String, Ecosystem), CrateFeatures>,

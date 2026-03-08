@@ -1,7 +1,7 @@
 //! crates.io Registry Client
 //!
 //! Implements the crates.io sparse index protocol for fetching crate metadata.
-//! Index Documentation: https://doc.rust-lang.org/cargo/reference/registry-index.html
+//! Index Documentation: <https://doc.rust-lang.org/cargo/reference/registry-index.html>
 //!
 //! # Security
 //!

@@ -1,7 +1,7 @@
 //! Maven Central Repository Client
 //!
 //! Implements the Maven repository protocol for fetching artifact metadata.
-//! Repository Layout: https://maven.apache.org/repositories/metadata.html
+//! Repository Layout: <https://maven.apache.org/repositories/metadata.html>
 //!
 //! # Security
 //!

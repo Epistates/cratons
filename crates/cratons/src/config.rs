@@ -4,7 +4,7 @@
 //! 1. Defaults
 //! 2. System config: `/etc/cratons/config.toml` (Unix only)
 //! 3. User config: `~/.config/cratons/config.toml`
-//! 4. Project config: `./cratons.toml` [config] section
+//! 4. Project config: `./cratons.toml` `[config]` section
 //! 5. Environment variables (CRATONS_*)
 //! 6. Corporate policy: `/etc/cratons/policy.toml` (wins all, keys are locked)
 //!
@@ -262,7 +262,7 @@ impl Config {
     /// 1. Defaults
     /// 2. System config (/etc/cratons/config.toml)
     /// 3. User config (~/.config/cratons/config.toml)
-    /// 4. Project config (./cratons.toml [config] section)
+    /// 4. Project config (./cratons.toml `[config]` section)
     /// 5. Environment variable overrides
     /// 6. Corporate policy (wins all, locks keys)
     pub fn load() -> Self {
@@ -426,7 +426,7 @@ impl Config {
         }
     }
 
-    /// Load [config] section from project cratons.toml.
+    /// Load `[config]` section from project cratons.toml.
     fn load_project_config() -> Option<Self> {
         let manifest_path = PathBuf::from("cratons.toml");
         if !manifest_path.exists() {

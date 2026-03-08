@@ -331,7 +331,7 @@ impl ToolchainVerifier {
     /// * `data` - The artifact bytes to verify
     /// * `bundle_json` - The Sigstore bundle JSON (`.sigstore` file)
     /// * `expected_identity` - Expected OIDC identity (e.g., "pablogsal@python.org")
-    /// * `expected_issuer` - Expected OIDC issuer (e.g., "https://accounts.google.com")
+    /// * `expected_issuer` - Expected OIDC issuer (e.g., `https://accounts.google.com`)
     ///
     /// # Example
     ///
@@ -687,7 +687,7 @@ pub enum SignatureData {
         bundle_json: String,
         /// Expected OIDC identity (e.g., "pablogsal@python.org")
         identity: String,
-        /// Expected OIDC issuer (e.g., "https://accounts.google.com")
+        /// Expected OIDC issuer (e.g., `https://accounts.google.com`)
         issuer: String,
     },
     /// GPG/OpenPGP detached signature
