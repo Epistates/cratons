@@ -1,10 +1,16 @@
 //! CLI configuration file support.
 //!
-//! Loads configuration from (in order of precedence):
-//! 1. Environment variables (CRATONS_*)
-//! 2. Project config: `./cratons.toml` [config] section
+//! Loads configuration from (in order of precedence, highest last):
+//! 1. Defaults
+//! 2. System config: `/etc/cratons/config.toml` (Unix only)
 //! 3. User config: `~/.config/cratons/config.toml`
-//! 4. System config: `/etc/cratons/config.toml` (Unix only)
+//! 4. Project config: `./cratons.toml` [config] section
+//! 5. Environment variables (CRATONS_*)
+//! 6. Corporate policy: `/etc/cratons/policy.toml` (wins all, keys are locked)
+//!
+//! Any key present in the corporate policy file is "locked" and cannot be
+//! overridden by any other source. The corp config path can be overridden
+//! via `CRATONS_CORP_CONFIG` env var (useful for CI/testing).
 //!
 //! # Example Configuration
 //!
@@ -12,48 +18,67 @@
 //! # ~/.config/cratons/config.toml
 //!
 //! [cache]
-//! # Local cache directory (default: ~/.cache/cratons)
 //! dir = "~/.cache/cratons"
 //!
 //! [cache.remote]
-//! # Remote cache backend: s3, http, filesystem
 //! type = "s3"
 //! url = "s3://my-bucket/cratons-cache"
 //! region = "us-east-1"
-//! # token = "..." # Or use CRATONS_CACHE_TOKEN env var
 //!
 //! [install]
-//! # Number of parallel downloads
 //! concurrency = 8
-//! # Run post-install scripts
 //! run_scripts = true
-//! # Fail if scripts fail (default: false)
 //! strict_scripts = false
 //!
 //! [build]
-//! # Default memory limit for builds (bytes)
 //! memory_limit = 4294967296  # 4GB
-//! # Default timeout (seconds)
 //! timeout = 600
-//! # Push artifacts to remote cache
 //! push_to_remote = false
 //!
 //! [security]
-//! # Minimum severity to fail audit
 //! fail_on = "high"
-//! # Enable strict verification for toolchain downloads
 //! strict_verification = false
 //!
 //! [telemetry]
-//! # Enable OpenTelemetry tracing
 //! enabled = false
-//! # OTLP endpoint
 //! endpoint = "http://localhost:4317"
 //! ```
 
+use cratons_resolver::registry::RegistryPolicyConfig;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
+
+/// Source of a configuration value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// Built-in defaults
+    Default,
+    /// System-wide config (`/etc/cratons/config.toml`)
+    System,
+    /// User config (`~/.config/cratons/config.toml`)
+    User,
+    /// Project config (`./cratons.toml` `[config]` section)
+    Project,
+    /// Environment variable override
+    Env,
+    /// Corporate policy (locked, cannot be overridden)
+    Corp,
+}
+
+impl fmt::Display for ConfigSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Default => write!(f, "default"),
+            Self::System => write!(f, "system"),
+            Self::User => write!(f, "user"),
+            Self::Project => write!(f, "project"),
+            Self::Env => write!(f, "env"),
+            Self::Corp => write!(f, "corp"),
+        }
+    }
+}
 
 /// CLI configuration loaded from config files and environment.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -71,6 +96,8 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     /// Registry overrides
     pub registries: HashMap<String, RegistryConfig>,
+    /// Registry access policy
+    pub registry_policy: RegistryPolicyConfig,
 }
 
 /// Cache configuration.
@@ -218,39 +245,144 @@ pub struct RegistryConfig {
     pub token: Option<String>,
 }
 
+/// Configuration with provenance tracking and corporate locking.
+pub struct ConfigWithProvenance {
+    /// The resolved configuration
+    pub config: Config,
+    /// Keys that are locked by corporate policy
+    pub locked_keys: HashSet<String>,
+    /// Source of each key's value
+    pub sources: HashMap<String, ConfigSource>,
+}
+
 impl Config {
     /// Load configuration from all sources.
     ///
-    /// Sources are checked in order of precedence:
-    /// 1. Environment variables
-    /// 2. Project config (./cratons.toml [config] section)
+    /// Sources are applied in order (last wins):
+    /// 1. Defaults
+    /// 2. System config (/etc/cratons/config.toml)
     /// 3. User config (~/.config/cratons/config.toml)
-    /// 4. System config (/etc/cratons/config.toml)
+    /// 4. Project config (./cratons.toml [config] section)
+    /// 5. Environment variable overrides
+    /// 6. Corporate policy (wins all, locks keys)
     pub fn load() -> Self {
-        let mut config = Self::default();
+        Self::load_with_provenance().config
+    }
 
-        // Load from system config (lowest precedence)
+    /// Load configuration with full provenance tracking.
+    pub fn load_with_provenance() -> ConfigWithProvenance {
+        let mut config = Self::default();
+        let mut sources: HashMap<String, ConfigSource> = HashMap::new();
+
+        // Track default keys
+        let default_val = toml::to_string(&config)
+            .ok()
+            .and_then(|s| s.parse::<toml::Value>().ok())
+            .unwrap_or(toml::Value::Table(toml::map::Map::new()));
+        let default_keys = extract_present_keys(&default_val, "");
+        for key in &default_keys {
+            sources.insert(key.clone(), ConfigSource::Default);
+        }
+
+        // Load from system config (lowest file precedence)
         #[cfg(unix)]
         if let Some(system_config) = Self::load_file("/etc/cratons/config.toml") {
+            if let Ok(raw) = std::fs::read_to_string("/etc/cratons/config.toml") {
+                if let Ok(val) = raw.parse::<toml::Value>() {
+                    for key in extract_present_keys(&val, "") {
+                        sources.insert(key, ConfigSource::System);
+                    }
+                }
+            }
             config = config.merge(system_config);
         }
 
         // Load from user config
         if let Some(user_config_path) = Self::user_config_path() {
             if let Some(user_config) = Self::load_file(&user_config_path) {
+                if let Ok(raw) = std::fs::read_to_string(&user_config_path) {
+                    if let Ok(val) = raw.parse::<toml::Value>() {
+                        for key in extract_present_keys(&val, "") {
+                            sources.insert(key, ConfigSource::User);
+                        }
+                    }
+                }
                 config = config.merge(user_config);
             }
         }
 
         // Load from project config ([config] section of cratons.toml)
         if let Some(project_config) = Self::load_project_config() {
+            if let Ok(raw) = std::fs::read_to_string("cratons.toml") {
+                if let Ok(manifest) = raw.parse::<toml::Value>() {
+                    if let Some(config_section) = manifest.get("config") {
+                        for key in extract_present_keys(config_section, "") {
+                            sources.insert(key, ConfigSource::Project);
+                        }
+                    }
+                }
+            }
             config = config.merge(project_config);
         }
 
-        // Apply environment variable overrides (highest precedence)
-        config.apply_env_overrides();
+        // Apply environment variable overrides
+        let env_keys = config.apply_env_overrides();
+        for key in env_keys {
+            sources.insert(key, ConfigSource::Env);
+        }
 
-        config
+        // Load corporate policy (wins all)
+        let mut locked_keys = HashSet::new();
+        if let Some(corp_path) = Self::corp_config_path() {
+            if let Some(corp_config) = Self::load_file(&corp_path) {
+                if let Ok(raw) = std::fs::read_to_string(&corp_path) {
+                    if let Ok(val) = raw.parse::<toml::Value>() {
+                        let corp_keys = extract_present_keys(&val, "");
+                        for key in &corp_keys {
+                            sources.insert(key.clone(), ConfigSource::Corp);
+                        }
+                        locked_keys = corp_keys;
+                    }
+                }
+                config = config.merge(corp_config);
+            }
+        }
+
+        ConfigWithProvenance {
+            config,
+            locked_keys,
+            sources,
+        }
+    }
+
+    /// Get the corporate policy config file path.
+    pub fn corp_config_path() -> Option<PathBuf> {
+        // Check env var override first (for CI/testing)
+        if let Ok(path) = std::env::var("CRATONS_CORP_CONFIG") {
+            let p = PathBuf::from(&path);
+            if p.exists() {
+                return Some(p);
+            }
+            return None;
+        }
+
+        // Platform-specific default
+        #[cfg(unix)]
+        {
+            let path = PathBuf::from("/etc/cratons/policy.toml");
+            if path.exists() {
+                return Some(path);
+            }
+        }
+        #[cfg(windows)]
+        {
+            let path = PathBuf::from(r"C:\ProgramData\cratons\policy.toml");
+            if path.exists() {
+                return Some(path);
+            }
+        }
+
+        None
     }
 
     /// Get the user config file path.
@@ -356,14 +488,33 @@ impl Config {
         // Registries
         self.registries.extend(other.registries);
 
+        // Registry policy
+        if other.registry_policy.default.is_some() {
+            self.registry_policy.default = other.registry_policy.default;
+        }
+        if !other.registry_policy.allow.is_empty() {
+            self.registry_policy.allow = other.registry_policy.allow;
+        }
+        if !other.registry_policy.block.is_empty() {
+            self.registry_policy.block = other.registry_policy.block;
+        }
+        if !other.registry_policy.access.is_empty() {
+            self.registry_policy
+                .access
+                .extend(other.registry_policy.access);
+        }
+
         self
     }
 
-    /// Apply environment variable overrides.
-    fn apply_env_overrides(&mut self) {
+    /// Apply environment variable overrides. Returns the keys that were set.
+    fn apply_env_overrides(&mut self) -> Vec<String> {
+        let mut set_keys = Vec::new();
+
         // Cache
         if let Ok(dir) = std::env::var("CRATONS_CACHE_DIR") {
             self.cache.dir = Some(PathBuf::from(dir));
+            set_keys.push("cache.dir".to_string());
         }
 
         // Remote cache from env
@@ -390,51 +541,64 @@ impl Config {
                 token,
                 read_only: None,
             });
+            set_keys.push("cache.remote".to_string());
         }
 
         // Install
         if let Ok(val) = std::env::var("CRATONS_CONCURRENCY") {
             if let Ok(n) = val.parse() {
                 self.install.concurrency = n;
+                set_keys.push("install.concurrency".to_string());
             }
         }
         if let Ok(val) = std::env::var("CRATONS_STRICT_SCRIPTS") {
             self.install.strict_scripts = val == "1" || val.eq_ignore_ascii_case("true");
+            set_keys.push("install.strict_scripts".to_string());
         }
 
         // Build
         if let Ok(val) = std::env::var("CRATONS_BUILD_TIMEOUT") {
             if let Ok(n) = val.parse() {
                 self.build.timeout = Some(n);
+                set_keys.push("build.timeout".to_string());
             }
         }
         if let Ok(val) = std::env::var("CRATONS_PUSH_TO_REMOTE") {
             self.build.push_to_remote = val == "1" || val.eq_ignore_ascii_case("true");
+            set_keys.push("build.push_to_remote".to_string());
         }
         if let Ok(val) = std::env::var("CRATONS_MAX_PARALLEL") {
             if let Ok(n) = val.parse() {
                 self.build.max_parallel = n;
+                set_keys.push("build.max_parallel".to_string());
             }
         }
 
         // Security
         if let Ok(val) = std::env::var("CRATONS_FAIL_ON") {
             self.security.fail_on = val;
+            set_keys.push("security.fail_on".to_string());
         }
         if let Ok(val) = std::env::var("CRATONS_STRICT_VERIFICATION") {
             self.security.strict_verification = val == "1" || val.eq_ignore_ascii_case("true");
+            set_keys.push("security.strict_verification".to_string());
         }
 
         // Telemetry
         if let Ok(val) = std::env::var("CRATONS_TELEMETRY_ENABLED") {
             self.telemetry.enabled = val == "1" || val.eq_ignore_ascii_case("true");
+            set_keys.push("telemetry.enabled".to_string());
         }
         if let Ok(val) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
             self.telemetry.endpoint = Some(val);
+            set_keys.push("telemetry.endpoint".to_string());
         }
         if let Ok(val) = std::env::var("OTEL_SERVICE_NAME") {
             self.telemetry.service_name = val;
+            set_keys.push("telemetry.service_name".to_string());
         }
+
+        set_keys
     }
 
     /// Get the remote cache URL if configured.
@@ -484,6 +648,40 @@ impl Config {
             _ => None,
         }
     }
+}
+
+/// Extract all explicitly-set keys from a TOML value, using dot-separated paths.
+pub fn extract_present_keys(value: &toml::Value, prefix: &str) -> HashSet<String> {
+    let mut keys = HashSet::new();
+
+    match value {
+        toml::Value::Table(table) => {
+            for (k, v) in table {
+                let full_key = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{}.{}", prefix, k)
+                };
+
+                match v {
+                    toml::Value::Table(_) => {
+                        // Recurse into nested tables
+                        keys.extend(extract_present_keys(v, &full_key));
+                    }
+                    _ => {
+                        keys.insert(full_key);
+                    }
+                }
+            }
+        }
+        _ => {
+            if !prefix.is_empty() {
+                keys.insert(prefix.to_string());
+            }
+        }
+    }
+
+    keys
 }
 
 /// Singleton for lazily loaded config.
@@ -543,5 +741,151 @@ mod tests {
         assert_eq!(config.install.concurrency, 4);
         assert!(config.install.strict_scripts);
         assert_eq!(config.security.fail_on, "critical");
+    }
+
+    #[test]
+    fn test_extract_present_keys() {
+        let toml_str = r#"
+            [security]
+            fail_on = "medium"
+            strict_verification = true
+
+            [install]
+            run_scripts = false
+        "#;
+        let val: toml::Value = toml_str.parse().unwrap();
+        let keys = extract_present_keys(&val, "");
+
+        assert!(keys.contains("security.fail_on"));
+        assert!(keys.contains("security.strict_verification"));
+        assert!(keys.contains("install.run_scripts"));
+        assert!(!keys.contains("install.concurrency"));
+    }
+
+    #[test]
+    fn test_corp_config_merge_wins() {
+        // Simulate: user sets fail_on=low, corp sets fail_on=critical
+        let user = Config {
+            security: SecurityConfig {
+                fail_on: "low".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let corp = Config {
+            security: SecurityConfig {
+                fail_on: "critical".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // Corp merges last, so it wins
+        let merged = user.merge(corp);
+        assert_eq!(merged.security.fail_on, "critical");
+    }
+
+    #[test]
+    fn test_registry_policy_config_parse() {
+        let toml_str = r#"
+            [registry_policy]
+            default = "blocked"
+            allow = ["npm.corp.com", "*.internal.com"]
+            block = ["evil.com"]
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.registry_policy.default, Some("blocked".to_string()));
+        assert_eq!(config.registry_policy.allow.len(), 2);
+        assert_eq!(config.registry_policy.block.len(), 1);
+    }
+
+    #[test]
+    fn test_registry_policy_merge() {
+        let base = Config::default();
+        let corp = Config {
+            registry_policy: RegistryPolicyConfig {
+                default: Some("blocked".to_string()),
+                allow: vec!["npm.corp.com".to_string()],
+                block: vec!["evil.com".to_string()],
+                access: Default::default(),
+            },
+            ..Default::default()
+        };
+
+        let merged = base.merge(corp);
+        assert_eq!(merged.registry_policy.default, Some("blocked".to_string()));
+        assert_eq!(merged.registry_policy.allow, vec!["npm.corp.com"]);
+        assert_eq!(merged.registry_policy.block, vec!["evil.com"]);
+    }
+
+    #[test]
+    fn test_corp_config_load_and_merge() {
+        use std::io::Write;
+
+        // Create a temp corp config file
+        let dir = tempfile::tempdir().unwrap();
+        let corp_path = dir.path().join("policy.toml");
+        let mut f = std::fs::File::create(&corp_path).unwrap();
+        writeln!(
+            f,
+            r#"
+[security]
+fail_on = "critical"
+strict_verification = true
+"#
+        )
+        .unwrap();
+
+        // Test loading the corp config file directly
+        let corp_config = Config::load_file(&corp_path).unwrap();
+        assert_eq!(corp_config.security.fail_on, "critical");
+        assert!(corp_config.security.strict_verification);
+
+        // Test that corp config wins when merged last
+        let user_config = Config {
+            security: SecurityConfig {
+                fail_on: "low".to_string(),
+                strict_verification: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = user_config.merge(corp_config);
+        assert_eq!(merged.security.fail_on, "critical");
+        assert!(merged.security.strict_verification);
+    }
+
+    #[test]
+    fn test_corp_locked_keys_detection() {
+        use std::io::Write;
+
+        // Create a temp corp config file
+        let dir = tempfile::tempdir().unwrap();
+        let corp_path = dir.path().join("policy.toml");
+        let mut f = std::fs::File::create(&corp_path).unwrap();
+        writeln!(
+            f,
+            r#"
+[security]
+fail_on = "critical"
+strict_verification = true
+
+[install]
+run_scripts = false
+"#
+        )
+        .unwrap();
+
+        // Parse and extract keys
+        let raw = std::fs::read_to_string(&corp_path).unwrap();
+        let val: toml::Value = raw.parse().unwrap();
+        let locked = extract_present_keys(&val, "");
+
+        assert!(locked.contains("security.fail_on"));
+        assert!(locked.contains("security.strict_verification"));
+        assert!(locked.contains("install.run_scripts"));
+        assert!(!locked.contains("install.concurrency")); // not in corp file
+        assert!(!locked.contains("telemetry.enabled")); // not in corp file
     }
 }
