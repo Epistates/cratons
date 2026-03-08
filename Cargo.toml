@@ -19,7 +19,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -31,19 +31,19 @@ repository = "https://github.com/rnpm/cratons"
 
 [workspace.dependencies]
 # Internal crates
-cratons-core = { path = "crates/cratons-core" }
-cratons-store = { path = "crates/cratons-store" }
-cratons-manifest = { path = "crates/cratons-manifest" }
-cratons-lockfile = { path = "crates/cratons-lockfile" }
-cratons-resolver = { path = "crates/cratons-resolver" }
-cratons-builder = { path = "crates/cratons-builder" }
-cratons-installer = { path = "crates/cratons-installer" }
-cratons-workspace = { path = "crates/cratons-workspace" }
-cratons-security = { path = "crates/cratons-security" }
-cratons-sandbox = { path = "crates/cratons-sandbox" }
-cratons-environment = { path = "crates/cratons-environment" }
-cratons-credentials = { path = "crates/cratons-credentials" }
-cratons-test-fixtures = { path = "crates/cratons-test-fixtures" }
+cratons-core = { path = "crates/cratons-core", version = "0.1.0" }
+cratons-store = { path = "crates/cratons-store", version = "0.1.0" }
+cratons-manifest = { path = "crates/cratons-manifest", version = "0.1.0" }
+cratons-lockfile = { path = "crates/cratons-lockfile", version = "0.1.0" }
+cratons-resolver = { path = "crates/cratons-resolver", version = "0.1.0" }
+cratons-builder = { path = "crates/cratons-builder", version = "0.1.0" }
+cratons-installer = { path = "crates/cratons-installer", version = "0.1.0" }
+cratons-workspace = { path = "crates/cratons-workspace", version = "0.1.0" }
+cratons-security = { path = "crates/cratons-security", version = "0.1.0" }
+cratons-sandbox = { path = "crates/cratons-sandbox", version = "0.1.0" }
+cratons-environment = { path = "crates/cratons-environment", version = "0.1.0" }
+cratons-credentials = { path = "crates/cratons-credentials", version = "0.1.0" }
+cratons-test-fixtures = { path = "crates/cratons-test-fixtures", version = "0.1.0" }
 
 # youki crates (container runtime) - using published crates.io versions for supply chain security
 libcontainer = "0.5"

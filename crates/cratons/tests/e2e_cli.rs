@@ -200,7 +200,7 @@ fn test_version_flag() {
         "Version output missing binary name"
     );
     assert!(
-        stdout.contains("0.2"),
+        stdout.contains("0.1"),
         "Version output missing version number"
     );
 }
