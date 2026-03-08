@@ -274,6 +274,22 @@ pub enum CratonsError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    /// Corporate policy locked key
+    #[error("Configuration key '{key}' is locked by corporate policy and cannot be overridden")]
+    CorpLocked {
+        /// The locked configuration key
+        key: String,
+    },
+
+    /// Registry access denied by policy
+    #[error("Registry access denied for '{registry}': {reason}")]
+    RegistryAccessDenied {
+        /// The registry domain or URL
+        registry: String,
+        /// Reason for denial
+        reason: String,
+    },
+
     /// Directory traversal error
     #[error("Directory traversal error: {0}")]
     WalkDir(String),
