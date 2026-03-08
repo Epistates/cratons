@@ -6,16 +6,27 @@
 
 use crate::registry::Registry;
 use cratons_core::{CratonsError, Ecosystem, ResolutionStrategy, Result};
-use pubgrub::range::Range;
-use pubgrub::solver::{Dependencies, DependencyConstraints, DependencyProvider, resolve};
-use pubgrub::version::Version;
-use std::borrow::Borrow;
+use pubgrub::{
+    Dependencies, DependencyConstraints, DependencyProvider, PackageResolutionStatistics, Ranges,
+    resolve,
+};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt::{Debug, Display};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::runtime::Handle;
+
+/// Error type for the SAT dependency provider.
+#[derive(Debug, thiserror::Error)]
+pub enum SatResolverError {
+    /// Registry or I/O error during resolution.
+    #[error("{0}")]
+    Registry(#[from] CratonsError),
+    /// Generic resolution error.
+    #[error("{0}")]
+    Other(String),
+}
 
 // --- Version Types ---
 
@@ -50,12 +61,8 @@ impl Ord for SatVersion {
             (Self::Pep440(a), Self::Pep440(b)) => a.cmp(b),
             (Self::Virtual(a), Self::Virtual(b)) => a.cmp(b),
 
-            // Virtual is lowest (needed for PubGrub Version::lowest())
-            // SemVer < Pep440
+            // Virtual is lowest, SemVer < Pep440
             (Self::Virtual(_), _) | (Self::SemVer(_), Self::Pep440(_)) => Ordering::Less,
-
-            // Virtual is lowest (implied by above)
-            // Pep440 > SemVer
             (_, Self::Virtual(_)) | (Self::Pep440(_), Self::SemVer(_)) => Ordering::Greater,
         }
     }
@@ -64,28 +71,6 @@ impl Ord for SatVersion {
 impl PartialOrd for SatVersion {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
-    }
-}
-
-impl Version for SatVersion {
-    fn lowest() -> Self {
-        Self::Virtual(0)
-    }
-
-    fn bump(&self) -> Self {
-        match self {
-            Self::SemVer(v) => {
-                let mut n = v.clone();
-                n.patch += 1;
-                Self::SemVer(n)
-            }
-            Self::Pep440(_) => {
-                // PEP 440 bump is complex, for SAT solving 'bump' is used for
-                // optimizing ranges. Returning clone is safe fallback if strict bumping isn't possible.
-                self.clone()
-            }
-            Self::Virtual(v) => Self::Virtual(v + 1),
-        }
     }
 }
 
@@ -193,38 +178,52 @@ struct SatDependencyProvider {
     strategies: BTreeMap<Ecosystem, ResolutionStrategy>,
 }
 
-impl DependencyProvider<SatPackage, SatVersion> for SatDependencyProvider {
-    // Select the best version from the potential packages.
-    fn choose_package_version<T: Borrow<SatPackage>, U: Borrow<Range<SatVersion>>>(
+impl DependencyProvider for SatDependencyProvider {
+    type P = SatPackage;
+    type V = SatVersion;
+    type VS = Ranges<SatVersion>;
+    type M = String;
+    type Priority = u32;
+    type Err = SatResolverError;
+
+    fn prioritize(
         &self,
-        mut potential_packages: impl Iterator<Item = (T, U)>,
-    ) -> std::result::Result<(T, Option<SatVersion>), Box<dyn std::error::Error>> {
-        // Simple strategy: Pick the first package
-        let Some((package, range)) = potential_packages.next() else {
-            return Err("PubGrub called choose_package_version with empty iterator".into());
-        };
+        package: &SatPackage,
+        _range: &Ranges<SatVersion>,
+        _stats: &PackageResolutionStatistics,
+    ) -> u32 {
+        // Root package gets highest priority
+        if package == &self.root_package {
+            u32::MAX
+        } else {
+            0
+        }
+    }
 
-        let pkg = package.borrow();
-        let range = range.borrow();
-
+    fn choose_version(
+        &self,
+        package: &SatPackage,
+        range: &Ranges<SatVersion>,
+    ) -> std::result::Result<Option<SatVersion>, Self::Err> {
         // Virtual root package logic
-        if pkg == &self.root_package {
+        if package == &self.root_package {
             let v = SatVersion::Virtual(1);
             if range.contains(&v) {
-                return Ok((package, Some(v)));
+                return Ok(Some(v));
             }
-            return Ok((package, None));
+            return Ok(None);
         }
 
         // Fetch versions from registry
-        let versions_raw = self
-            .handle
-            .block_on(self.registry.fetch_versions(pkg.ecosystem, &pkg.name))?;
+        let versions_raw = self.handle.block_on(
+            self.registry
+                .fetch_versions(package.ecosystem, &package.name),
+        )?;
 
         // Parse versions based on ecosystem
         let mut parsed_versions: Vec<SatVersion> = versions_raw
             .iter()
-            .filter_map(|v_str| match pkg.ecosystem {
+            .filter_map(|v_str| match package.ecosystem {
                 Ecosystem::Npm | Ecosystem::Crates | Ecosystem::Go | Ecosystem::Maven => {
                     semver::Version::parse(v_str).ok().map(SatVersion::SemVer)
                 }
@@ -239,7 +238,7 @@ impl DependencyProvider<SatPackage, SatVersion> for SatDependencyProvider {
         // Apply ecosystem-specific strategy
         let strategy = self
             .strategies
-            .get(&pkg.ecosystem)
+            .get(&package.ecosystem)
             .copied()
             .unwrap_or(ResolutionStrategy::MaxSatisfying);
 
@@ -249,11 +248,11 @@ impl DependencyProvider<SatPackage, SatVersion> for SatDependencyProvider {
                     .into_iter()
                     .rev()
                     .find(|v| range.contains(v));
-                Ok((package, best_version))
+                Ok(best_version)
             }
             ResolutionStrategy::Minimal => {
                 let best_version = parsed_versions.into_iter().find(|v| range.contains(v));
-                Ok((package, best_version))
+                Ok(best_version)
             }
         }
     }
@@ -262,8 +261,8 @@ impl DependencyProvider<SatPackage, SatVersion> for SatDependencyProvider {
         &self,
         package: &SatPackage,
         version: &SatVersion,
-    ) -> std::result::Result<Dependencies<SatPackage, SatVersion>, Box<dyn std::error::Error>> {
-        let mut deps: DependencyConstraints<SatPackage, SatVersion> = HashMap::default();
+    ) -> std::result::Result<Dependencies<SatPackage, Ranges<SatVersion>, String>, Self::Err> {
+        let mut deps = DependencyConstraints::<SatPackage, Ranges<SatVersion>>::default();
 
         // Root dependencies
         if package == &self.root_package {
@@ -275,7 +274,7 @@ impl DependencyProvider<SatPackage, SatVersion> for SatDependencyProvider {
                 let range = parse_range(*ecosystem, req);
                 deps.insert(dep_pkg, range);
             }
-            return Ok(Dependencies::Known(deps));
+            return Ok(Dependencies::Available(deps));
         }
 
         // Fetch metadata
@@ -327,30 +326,32 @@ impl DependencyProvider<SatPackage, SatVersion> for SatDependencyProvider {
             // Optional peer deps are NOT added as constraints
         }
 
-        Ok(Dependencies::Known(deps))
+        Ok(Dependencies::Available(deps))
     }
 }
 
 // --- Range Parsing ---
 
 /// Parse a version requirement string into a `PubGrub` Range.
-fn parse_range(ecosystem: Ecosystem, req: &str) -> Range<SatVersion> {
+fn parse_range(ecosystem: Ecosystem, req: &str) -> Ranges<SatVersion> {
     if req == "*" || req.is_empty() {
-        return Range::any();
+        return Ranges::full();
     }
 
     match ecosystem {
-        Ecosystem::Npm | Ecosystem::Crates => semver::VersionReq::parse(req)
-            .map_or_else(|_| Range::any(), |semver_req| semver_to_range(&semver_req)),
+        Ecosystem::Npm | Ecosystem::Crates => semver::VersionReq::parse(req).map_or_else(
+            |_| Ranges::full(),
+            |semver_req| semver_to_range(&semver_req),
+        ),
         Ecosystem::PyPi => req
             .parse::<pep440_rs::VersionSpecifiers>()
-            .map_or_else(|_| Range::any(), |pep_req| pep440_to_range(&pep_req)),
-        _ => Range::any(),
+            .map_or_else(|_| Ranges::full(), |pep_req| pep440_to_range(&pep_req)),
+        _ => Ranges::full(),
     }
 }
 
-fn semver_to_range(req: &semver::VersionReq) -> Range<SatVersion> {
-    let mut final_range = Range::any();
+fn semver_to_range(req: &semver::VersionReq) -> Ranges<SatVersion> {
+    let mut final_range = Ranges::full();
 
     for comparator in &req.comparators {
         let v = SatVersion::SemVer(semver::Version {
@@ -362,23 +363,11 @@ fn semver_to_range(req: &semver::VersionReq) -> Range<SatVersion> {
         });
 
         let comp_range = match comparator.op {
-            semver::Op::Exact => Range::exact(v),
-            semver::Op::Greater => {
-                // > v  :=  (>= v) \ {v}
-                Range::higher_than(v.clone()).intersection(&Range::exact(v).negate())
-            }
-            semver::Op::GreaterEq => Range::higher_than(v),
-            semver::Op::Less => {
-                // < v  :=  ! (>= v)
-                Range::higher_than(v).negate()
-            }
-            semver::Op::LessEq => {
-                // <= v :=  ! (> v)  :=  ! ((>= v) \ {v})
-                // Equivalent to: ! (Range::higher_than(v) \cap !Range::exact(v))
-                let strictly_higher =
-                    Range::higher_than(v.clone()).intersection(&Range::exact(v).negate());
-                strictly_higher.negate()
-            }
+            semver::Op::Exact => Ranges::singleton(v),
+            semver::Op::Greater => Ranges::strictly_higher_than(v),
+            semver::Op::GreaterEq => Ranges::higher_than(v),
+            semver::Op::Less => Ranges::strictly_lower_than(v),
+            semver::Op::LessEq => Ranges::lower_than(v),
             semver::Op::Tilde => {
                 // ~1.2.3 := >=1.2.3 <1.3.0
                 let upper = if comparator.minor.is_none() {
@@ -400,9 +389,8 @@ fn semver_to_range(req: &semver::VersionReq) -> Range<SatVersion> {
                     ))
                 };
 
-                // Range::between is buggy in some versions or usage, manual intersection:
                 // >= v AND < upper
-                Range::higher_than(v).intersection(&Range::higher_than(upper).negate())
+                Ranges::higher_than(v).intersection(&Ranges::strictly_lower_than(upper))
             }
             semver::Op::Caret => {
                 // ^1.2.3 := >=1.2.3 <2.0.0
@@ -424,9 +412,9 @@ fn semver_to_range(req: &semver::VersionReq) -> Range<SatVersion> {
                 };
 
                 // >= v AND < upper
-                Range::higher_than(v).intersection(&Range::higher_than(upper).negate())
+                Ranges::higher_than(v).intersection(&Ranges::strictly_lower_than(upper))
             }
-            semver::Op::Wildcard | _ => Range::any(),
+            semver::Op::Wildcard | _ => Ranges::full(),
         };
 
         final_range = final_range.intersection(&comp_range);
@@ -435,47 +423,37 @@ fn semver_to_range(req: &semver::VersionReq) -> Range<SatVersion> {
     final_range
 }
 
-fn pep440_to_range(req: &pep440_rs::VersionSpecifiers) -> Range<SatVersion> {
-    let mut final_range = Range::any();
+fn pep440_to_range(req: &pep440_rs::VersionSpecifiers) -> Ranges<SatVersion> {
+    let mut final_range = Ranges::full();
 
     for spec in req.iter() {
         let v = SatVersion::Pep440(spec.version().clone());
 
         let spec_range = match spec.operator() {
-            pep440_rs::Operator::Equal => Range::exact(v),
-            pep440_rs::Operator::NotEqual => Range::exact(v).negate(),
-            pep440_rs::Operator::GreaterThan => {
-                // > v
-                Range::higher_than(v.clone()).intersection(&Range::exact(v).negate())
-            }
-            pep440_rs::Operator::GreaterThanEqual => Range::higher_than(v),
-            pep440_rs::Operator::LessThan => Range::higher_than(v).negate(),
-            pep440_rs::Operator::LessThanEqual => {
-                // <= v
-                let strictly_higher =
-                    Range::higher_than(v.clone()).intersection(&Range::exact(v).negate());
-                strictly_higher.negate()
-            }
+            pep440_rs::Operator::Equal => Ranges::singleton(v),
+            pep440_rs::Operator::NotEqual => Ranges::singleton(v).complement(),
+            pep440_rs::Operator::GreaterThan => Ranges::strictly_higher_than(v),
+            pep440_rs::Operator::GreaterThanEqual => Ranges::higher_than(v),
+            pep440_rs::Operator::LessThan => Ranges::strictly_lower_than(v),
+            pep440_rs::Operator::LessThanEqual => Ranges::lower_than(v),
             pep440_rs::Operator::TildeEqual => {
                 // PEP 440 compatible release: ~=X.Y.Z means >=X.Y.Z, ==X.Y.*
-                // This allows patches but not minor/major bumps
                 // Example: ~=1.4.5 means >=1.4.5, <1.5.0
                 let release = spec.version().release();
                 if release.len() >= 2 {
-                    // Get major.minor and bump minor for upper bound
                     let major = release[0];
                     let minor = release[1];
                     let upper = pep440_rs::Version::from_str(&format!("{}.{}", major, minor + 1))
                         .unwrap_or_else(|_| spec.version().clone());
                     let upper_v = SatVersion::Pep440(upper);
                     // >= v AND < upper
-                    Range::higher_than(v).intersection(&Range::higher_than(upper_v).negate())
+                    Ranges::higher_than(v).intersection(&Ranges::strictly_lower_than(upper_v))
                 } else {
                     // Fallback for versions with only major: >= v
-                    Range::higher_than(v)
+                    Ranges::higher_than(v)
                 }
             }
-            _ => Range::any(),
+            _ => Ranges::full(),
         };
 
         final_range = final_range.intersection(&spec_range);
@@ -651,22 +629,5 @@ mod tests {
         // Invalid version requirement falls back to any
         let range = parse_range(Ecosystem::Npm, "not-a-version");
         assert!(range.contains(&SatVersion::SemVer(semver::Version::new(1, 0, 0))));
-    }
-
-    /// M-17: Test Version trait implementation (required by PubGrub)
-    #[test]
-    fn test_sat_version_trait() {
-        // lowest() should return Virtual(0)
-        let lowest = SatVersion::lowest();
-        assert!(matches!(lowest, SatVersion::Virtual(0)));
-
-        // bump() should increment
-        let v = SatVersion::SemVer(semver::Version::new(1, 2, 3));
-        let bumped = v.bump();
-        assert!(matches!(bumped, SatVersion::SemVer(ref sv) if sv.patch == 4));
-
-        let virtual_v = SatVersion::Virtual(5);
-        let bumped_v = virtual_v.bump();
-        assert!(matches!(bumped_v, SatVersion::Virtual(6)));
     }
 }

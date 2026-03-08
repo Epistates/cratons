@@ -21,7 +21,7 @@ tokio = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
-pubgrub = "0.2"
+pubgrub = "0.3"
 pep440_rs = "0.7"
 semver = { workspace = true }
 petgraph = { workspace = true }
