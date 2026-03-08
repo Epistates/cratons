@@ -30,7 +30,7 @@ tracing = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }
 zstd = { workspace = true }
-zip = "2.2"
+zip = "8.2"
 xz2 = "0.1"
 chrono = { workspace = true }
 dirs = { workspace = true }
@@ -40,7 +40,7 @@ base64 = { workspace = true }
 petgraph = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-junction = "1.0"
+junction = "1.4"
 
 [dev-dependencies]
 insta = { workspace = true }

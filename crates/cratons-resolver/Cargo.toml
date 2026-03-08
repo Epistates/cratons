@@ -26,6 +26,7 @@ pep440_rs = "0.7"
 semver = { workspace = true }
 petgraph = { workspace = true }
 tracing = { workspace = true }
+url = { workspace = true }
 urlencoding = { workspace = true }
 pep508_rs = { workspace = true }
 node-semver = { workspace = true }

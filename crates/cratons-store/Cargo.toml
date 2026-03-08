@@ -32,8 +32,8 @@ fs2 = "0.4"
 # Remote cache
 async-trait = { workspace = true }
 reqwest = { workspace = true }
-reqwest-middleware = "0.3"
-reqwest-retry = "0.5"
+reqwest-middleware = "0.5"
+reqwest-retry = "0.9"
 url = { workspace = true }
 tar = { workspace = true }
 zstd = { workspace = true }

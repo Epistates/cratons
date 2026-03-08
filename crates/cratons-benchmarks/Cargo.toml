@@ -33,7 +33,7 @@ rand = "0.8"
 
 [dev-dependencies]
 # Criterion benchmarking with async support
-criterion = { version = "0.7", features = ["async_tokio", "html_reports"] }
+criterion = { version = "0.8", features = ["async_tokio", "html_reports"] }
 
 [[bench]]
 name = "resolver"

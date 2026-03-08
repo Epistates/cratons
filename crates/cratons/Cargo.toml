@@ -45,10 +45,10 @@ tempfile = { workspace = true }
 toml = { workspace = true }
 
 # OpenTelemetry for SOTA Observability
-opentelemetry = "0.21"
-opentelemetry_sdk = { version = "0.21", features = ["rt-tokio"] }
-opentelemetry-otlp = "0.14"
-tracing-opentelemetry = "0.22"
+opentelemetry = "0.29"
+opentelemetry_sdk = { version = "0.29", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.29", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.30"
 pathdiff.workspace = true
 
 [dev-dependencies]

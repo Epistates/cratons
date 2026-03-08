@@ -1,13 +1,14 @@
 [package]
 name = "cratons-credentials"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Secure credential management for Cratons package manager"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/cratons-rs/cratons"
-keywords = ["credentials", "keychain", "secrets", "security"]
-categories = ["authentication", "config"]
-readme = "README.md"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
 
 [dependencies]
 # Cross-platform keychain access

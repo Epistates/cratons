@@ -35,11 +35,11 @@ tempfile = { workspace = true }
 wiremock = { workspace = true }
 
 # Property-based testing
-proptest = "1.5"
+proptest = "1.10"
 proptest-derive = "0.5"
 
 # Fake data generation
-fake = { version = "3.0", features = ["derive", "chrono", "semver", "uuid", "http"] }
+fake = { version = "4.4", features = ["derive", "chrono", "semver", "uuid", "http"] }
 rand = "0.8"
 
 # Date/time
