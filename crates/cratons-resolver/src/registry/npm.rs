@@ -149,6 +149,10 @@ impl RegistryClient for NpmClient {
         Ecosystem::Npm
     }
 
+    fn registry_url(&self) -> &str {
+        &self.registry_url
+    }
+
     #[instrument(skip(self), fields(ecosystem = "npm"))]
     async fn fetch_versions(&self, name: &str) -> Result<Vec<String>> {
         // SECURITY: Validate package name before using in URL to prevent SSRF

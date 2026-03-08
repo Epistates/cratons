@@ -162,6 +162,10 @@ impl RegistryClient for CratesIoClient {
         Ecosystem::Crates
     }
 
+    fn registry_url(&self) -> &str {
+        &self.index_url
+    }
+
     #[instrument(skip(self), fields(ecosystem = "crates"))]
     async fn fetch_versions(&self, name: &str) -> Result<Vec<String>> {
         // SECURITY: Validate crate name before using in URL to prevent SSRF

@@ -30,6 +30,10 @@ impl RegistryClient for MockWiremockClient {
         Ecosystem::Npm
     }
 
+    fn registry_url(&self) -> &str {
+        &self.base_url
+    }
+
     async fn fetch_versions(&self, name: &str) -> Result<Vec<String>> {
         let url = format!("{}/{}/versions", self.base_url, name);
         let response = self

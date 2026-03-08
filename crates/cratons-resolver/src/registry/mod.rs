@@ -24,12 +24,14 @@ mod crates;
 mod go;
 mod maven;
 mod npm;
+pub mod policy;
 mod pypi;
 
 pub use self::crates::CratesIoClient;
 pub use go::GoProxyClient;
 pub use maven::MavenClient;
 pub use npm::NpmClient;
+pub use policy::{RegistryPolicy, RegistryPolicyConfig};
 pub use pypi::PyPiClient;
 
 use async_trait::async_trait;
@@ -121,6 +123,9 @@ pub trait RegistryClient: Send + Sync {
     /// Get the ecosystem this registry serves.
     fn ecosystem(&self) -> Ecosystem;
 
+    /// Get the base registry URL for policy evaluation.
+    fn registry_url(&self) -> &str;
+
     /// Fetch available versions for a package.
     async fn fetch_versions(&self, name: &str) -> Result<Vec<String>>;
 
@@ -144,6 +149,8 @@ pub struct Registry {
     offline: bool,
     /// Rate limiter to prevent registry bans (10 requests per second with burst of 20)
     rate_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+    /// Optional registry access policy for domain-level access control
+    policy: Option<RegistryPolicy>,
 }
 
 /// Builder for configuring a Registry.
@@ -151,6 +158,7 @@ pub struct RegistryBuilder {
     offline: bool,
     cache: Option<RegistryCache>,
     root_certificates: Vec<reqwest::Certificate>,
+    policy: Option<RegistryPolicy>,
 }
 
 impl RegistryBuilder {
@@ -160,6 +168,7 @@ impl RegistryBuilder {
             offline: false,
             cache: None,
             root_certificates: Vec::new(),
+            policy: None,
         }
     }
 
@@ -172,6 +181,12 @@ impl RegistryBuilder {
     /// Set the registry cache.
     pub fn cache(mut self, cache: RegistryCache) -> Self {
         self.cache = Some(cache);
+        self
+    }
+
+    /// Set the registry access policy.
+    pub fn policy(mut self, policy: RegistryPolicy) -> Self {
+        self.policy = Some(policy);
         self
     }
 
@@ -212,6 +227,7 @@ impl RegistryBuilder {
             cache: self.cache,
             offline: self.offline,
             rate_limiter,
+            policy: self.policy,
         };
 
         // Register default clients
@@ -305,11 +321,37 @@ impl Registry {
         self.clients.len()
     }
 
+    /// Check registry access policy for the given ecosystem and operation.
+    fn check_policy(
+        &self,
+        ecosystem: Ecosystem,
+        operation: policy::RegistryOperation,
+    ) -> Result<()> {
+        if let Some(ref policy) = self.policy {
+            if !policy.has_rules() {
+                return Ok(());
+            }
+            if let Some(client) = self.client(ecosystem) {
+                let url = client.registry_url();
+                if let Some(domain) = policy::extract_domain(url) {
+                    policy.check(&domain, operation).map_err(|reason| {
+                        CratonsError::RegistryAccessDenied {
+                            registry: domain,
+                            reason,
+                        }
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Fetch versions from the appropriate registry.
     ///
     /// In offline mode, returns cached versions or an error if not cached.
     /// In online mode, uses cache if fresh, otherwise fetches from network and caches.
     pub async fn fetch_versions(&self, ecosystem: Ecosystem, name: &str) -> Result<Vec<String>> {
+        self.check_policy(ecosystem, policy::RegistryOperation::Read)?;
         // Try cache first
         if let Some(cache) = &self.cache {
             // In offline mode, return cached data regardless of freshness
@@ -373,6 +415,8 @@ impl Registry {
         name: &str,
         version: &str,
     ) -> Result<PackageMetadata> {
+        self.check_policy(ecosystem, policy::RegistryOperation::Read)?;
+
         // Try cache first
         if let Some(cache) = &self.cache {
             // In offline mode, return cached data regardless of freshness
@@ -443,6 +487,8 @@ impl Registry {
         name: &str,
         version: &str,
     ) -> Result<Vec<u8>> {
+        self.check_policy(ecosystem, policy::RegistryOperation::Download)?;
+
         if self.offline {
             return Err(CratonsError::Network(format!(
                 "Offline mode: Cannot download {}:{}@{} - check content-addressable store",
@@ -593,6 +639,10 @@ impl MockRegistry {
 impl RegistryClient for MockRegistry {
     fn ecosystem(&self) -> Ecosystem {
         self.ecosystem
+    }
+
+    fn registry_url(&self) -> &str {
+        "https://mock.registry.test"
     }
 
     async fn fetch_versions(&self, name: &str) -> Result<Vec<String>> {

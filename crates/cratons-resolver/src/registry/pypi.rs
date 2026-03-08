@@ -282,6 +282,10 @@ impl RegistryClient for PyPiClient {
         Ecosystem::PyPi
     }
 
+    fn registry_url(&self) -> &str {
+        &self.registry_url
+    }
+
     #[instrument(skip(self), fields(ecosystem = "pypi"))]
     async fn fetch_versions(&self, name: &str) -> Result<Vec<String>> {
         // SECURITY: Validate package name before using in URL to prevent SSRF

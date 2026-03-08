@@ -294,6 +294,10 @@ impl RegistryClient for GoProxyClient {
         Ecosystem::Go
     }
 
+    fn registry_url(&self) -> &str {
+        &self.proxy_url
+    }
+
     #[instrument(skip(self), fields(ecosystem = "go"))]
     async fn fetch_versions(&self, name: &str) -> Result<Vec<String>> {
         // SECURITY: Validate module path before using in URL to prevent SSRF
