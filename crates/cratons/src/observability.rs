@@ -35,8 +35,9 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
 // OTel imports
-use opentelemetry::{KeyValue, global};
-use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace as sdktrace};
+use opentelemetry::global;
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_sdk::Resource;
 
 /// Default log level for debug builds.
 #[cfg(debug_assertions)]
@@ -158,19 +159,27 @@ pub fn init(config: ObservabilityConfig) -> Result<()> {
 
     // Configure OpenTelemetry if enabled
     let otel_layer = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
-        global::set_text_map_propagator(TraceContextPropagator::new());
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .build()
+            .map_err(|e| miette!("failed to build otel exporter: {}", e))?;
 
-        let tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(opentelemetry_otlp::new_exporter().tonic())
-            .with_trace_config(sdktrace::config().with_resource(Resource::new(vec![
-                KeyValue::new("service.name", "cratons"),
-                KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-            ])))
-            .install_batch(opentelemetry_sdk::runtime::Tokio)
-            .map_err(|e| miette!("failed to install otel pipeline: {}", e))?;
+        let resource = Resource::builder()
+            .with_service_name("cratons")
+            .with_attribute(opentelemetry::KeyValue::new(
+                "service.version",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .build();
 
-        Some(tracing_opentelemetry::layer().with_tracer(tracer))
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(resource)
+            .build();
+
+        global::set_tracer_provider(provider.clone());
+
+        Some(tracing_opentelemetry::layer().with_tracer(provider.tracer("cratons")))
     } else {
         None
     };
