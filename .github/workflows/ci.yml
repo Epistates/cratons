@@ -32,7 +32,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
@@ -73,7 +73,7 @@ jobs:
           toolchain: ${{ matrix.rust }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
+        uses: mozilla-actions/sccache-action@v0.0.9
         if: matrix.os != 'windows-latest'
 
       - name: Cache dependencies
@@ -201,7 +201,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
@@ -305,7 +305,7 @@ jobs:
           category: cargo-audit
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -322,7 +322,7 @@ jobs:
           category: trivy
 
       - name: Trivy artifact scan (fail on critical)
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: 'fs'
           scan-ref: '.'
