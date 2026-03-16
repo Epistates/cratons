@@ -40,7 +40,7 @@ base64 = { workspace = true }
 petgraph = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-junction = "1.0"
+junction = "1.4"
 
 [dev-dependencies]
 insta = { workspace = true }
