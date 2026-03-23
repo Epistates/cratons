@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Performance benchmarks for Cratons package manager"
 keywords.workspace = true
 categories.workspace = true
+publish = false
 
 [dependencies]
 # Internal crates being benchmarked
