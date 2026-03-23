@@ -48,14 +48,14 @@ jobs:
           - pep440_parse
           - dependency_graph
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache cargo-fuzz
         id: cache-cargo-fuzz
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cargo/bin/cargo-fuzz
           key: ${{ runner.os }}-cargo-fuzz-0.12.0
@@ -157,7 +157,7 @@ jobs:
           fi
 
       - name: Restore corpus cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: corpus-${{ matrix.target }}-${{ github.sha }}
@@ -190,7 +190,7 @@ jobs:
 
       - name: Save corpus artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fuzz-corpus-${{ matrix.target }}
           path: |
@@ -199,7 +199,7 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fuzz-crashes-${{ matrix.target }}
           path: |
@@ -214,7 +214,7 @@ jobs:
     if: always()
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: fuzz-results
 
@@ -240,7 +240,7 @@ jobs:
           cat report.md
 
       - name: Upload report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fuzzing-report
           path: report.md
