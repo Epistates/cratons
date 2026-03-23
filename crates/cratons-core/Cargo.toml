@@ -28,7 +28,7 @@ tracing = { workspace = true }
 # SECURITY: Constant-time comparison to prevent timing attacks on hash verification
 subtle = { workspace = true }
 # SECURITY: Input validation for package names and paths
-regex = "1.11"
+regex = "1.12"
 
 [dev-dependencies]
 insta = { workspace = true }
