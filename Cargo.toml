@@ -168,7 +168,7 @@ globset = "0.4"
 # Testing
 assert_cmd = "2.0"
 predicates = "3.1"
-insta = { version = "1.41", features = ["json", "toml"] }
+insta = { version = "1.47", features = ["json", "toml"] }
 wiremock = "0.6"
 test-case = "3.3"
 
