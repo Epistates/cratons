@@ -219,7 +219,7 @@ jobs:
 
       - name: Upload test results
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: integration-test-results-${{ matrix.ecosystem }}
           path: |
@@ -265,7 +265,7 @@ jobs:
           alert-comment-cc-users: '@rnpm/maintainers'
 
       - name: Upload benchmark artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-results
           path: |
