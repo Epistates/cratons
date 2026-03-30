@@ -147,7 +147,7 @@ rayon = "1.10"
 chrono = { version = "0.4.44", features = ["serde"] }
 
 # UUID
-uuid = { version = "1.22", features = ["v4", "serde"] }
+uuid = { version = "1.23", features = ["v4", "serde"] }
 
 # URL parsing
 url = { version = "2.5", features = ["serde"] }
