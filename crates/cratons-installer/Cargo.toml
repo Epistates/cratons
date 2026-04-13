@@ -30,7 +30,7 @@ tracing = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }
 zstd = { workspace = true }
-zip = "8.2"
+zip = "8.5"
 xz2 = "0.1"
 chrono = { workspace = true }
 dirs = { workspace = true }

@@ -67,7 +67,7 @@ toml_edit = "0.22"
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
-clap_complete = "4.5"
+clap_complete = "4.6"
 
 # HTTP client
 reqwest = { version = "0.13", features = ["json", "stream", "rustls"], default-features = false }
@@ -82,7 +82,7 @@ aws-smithy-runtime-api = "1.7"
 
 # Crypto / Hashing
 sha2 = "0.10"
-blake3 = "1.5"
+blake3 = "1.8"
 hex = "0.4"
 base64 = "0.22"
 hmac = "0.12"
@@ -118,7 +118,7 @@ flate2 = "1.0"
 tar = "0.4"
 zstd = "0.13"
 xz2 = "0.1"
-zip = "8.2"
+zip = "8.5"
 
 # Semver
 semver = { version = "1.0", features = ["serde"] }
@@ -147,7 +147,7 @@ rayon = "1.10"
 chrono = { version = "0.4.44", features = ["serde"] }
 
 # UUID
-uuid = { version = "1.22", features = ["v4", "serde"] }
+uuid = { version = "1.23", features = ["v4", "serde"] }
 
 # URL parsing
 url = { version = "2.5", features = ["serde"] }
