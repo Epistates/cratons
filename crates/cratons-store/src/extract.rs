@@ -118,6 +118,180 @@ fn validate_extract_path(dest: &Path, entry_path: &Path) -> Result<PathBuf> {
     Ok(sanitized)
 }
 
+/// Validate that a symlink target stays within the extraction directory.
+fn validate_symlink_target(target: &Path, link_path: &Path) -> Result<()> {
+    if target.as_os_str().is_empty() {
+        return Err(CratonsError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Empty symlink target rejected: {}", link_path.display()),
+        )));
+    }
+
+    if target.is_absolute() {
+        return Err(CratonsError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Absolute symlink target rejected: {} -> {}",
+                link_path.display(),
+                target.display()
+            ),
+        )));
+    }
+
+    let mut depth = link_path
+        .parent()
+        .map(|parent| {
+            parent
+                .components()
+                .filter(|component| matches!(component, Component::Normal(_)))
+                .count() as i32
+        })
+        .unwrap_or(0);
+
+    for component in target.components() {
+        match component {
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err(CratonsError::Io(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Symlink target escapes destination: {} -> {}",
+                            link_path.display(),
+                            target.display()
+                        ),
+                    )));
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(CratonsError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Absolute symlink component rejected: {} -> {}",
+                        link_path.display(),
+                        target.display()
+                    ),
+                )));
+            }
+            Component::Normal(_) => {
+                depth += 1;
+            }
+            Component::CurDir => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate that a tar hard-link target resolves to an existing file inside `dest`.
+fn validate_hard_link_target(dest: &Path, target: &Path, link_path: &Path) -> Result<PathBuf> {
+    if target.as_os_str().is_empty() {
+        return Err(CratonsError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Empty hard link target rejected: {}", link_path.display()),
+        )));
+    }
+
+    if target.is_absolute() {
+        return Err(CratonsError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Absolute hard link target rejected: {} -> {}",
+                link_path.display(),
+                target.display()
+            ),
+        )));
+    }
+
+    for component in target.components() {
+        match component {
+            Component::ParentDir => {
+                return Err(CratonsError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Hard link target escapes destination: {} -> {}",
+                        link_path.display(),
+                        target.display()
+                    ),
+                )));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(CratonsError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Absolute hard link component rejected: {} -> {}",
+                        link_path.display(),
+                        target.display()
+                    ),
+                )));
+            }
+            Component::Normal(_) | Component::CurDir => {}
+        }
+    }
+
+    let canonical_dest = dest.canonicalize().map_err(|e| {
+        CratonsError::Io(io::Error::new(
+            e.kind(),
+            format!(
+                "Failed to canonicalize destination {}: {}",
+                dest.display(),
+                e
+            ),
+        ))
+    })?;
+    let resolved = canonical_dest.join(target);
+
+    if !resolved.exists() {
+        return Err(CratonsError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Hard link target does not exist inside destination: {} -> {}",
+                link_path.display(),
+                target.display()
+            ),
+        )));
+    }
+
+    let canonical_target = resolved.canonicalize().map_err(|e| {
+        CratonsError::Io(io::Error::new(
+            e.kind(),
+            format!(
+                "Failed to canonicalize hard link target {}: {}",
+                resolved.display(),
+                e
+            ),
+        ))
+    })?;
+
+    if !canonical_target.starts_with(&canonical_dest) {
+        return Err(CratonsError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Hard link target escapes destination: {} -> {}",
+                link_path.display(),
+                target.display()
+            ),
+        )));
+    }
+
+    Ok(canonical_target)
+}
+
+fn remove_existing_path(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                fs::remove_dir_all(path)?;
+            } else {
+                fs::remove_file(path)?;
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
 /// Safely extract a tar archive to a destination directory.
 ///
 /// This function validates each entry path before extraction to prevent
@@ -196,76 +370,100 @@ pub fn safe_unpack_tar_with_strip<R: Read>(
                 let mut file = File::create(&full_path)?;
                 io::copy(&mut entry, &mut file)?;
 
-                // Preserve permissions on Unix
+                // Preserve permissions on Unix, but strip SUID/SGID/sticky
+                // bits. A malicious archive must never be able to install a
+                // setuid binary via cratons, regardless of the process uid.
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
                     if let Ok(mode) = entry.header().mode() {
-                        let permissions = fs::Permissions::from_mode(mode);
+                        let permissions = fs::Permissions::from_mode(mode & 0o777);
                         fs::set_permissions(&full_path, permissions)?;
                     }
                 }
             }
-            tar::EntryType::Symlink | tar::EntryType::Link => {
-                // Validate symlink targets too
-                if let Ok(link_target) = entry.link_name() {
-                    if let Some(target) = link_target {
-                        // Check if symlink target would escape destination
-                        let resolved = sanitized_path
-                            .parent()
-                            .unwrap_or(Path::new(""))
-                            .join(&target);
-
-                        if resolved
-                            .components()
-                            .any(|c| matches!(c, Component::ParentDir))
-                        {
-                            let depth: i32 = resolved
-                                .components()
-                                .map(|c| match c {
-                                    Component::ParentDir => -1,
-                                    Component::Normal(_) => 1,
-                                    _ => 0,
-                                })
-                                .scan(0i32, |acc, x| {
-                                    *acc += x;
-                                    Some(*acc)
-                                })
-                                .min()
-                                .unwrap_or(0);
-
-                            if depth < 0 {
-                                warn!(
-                                    "Skipping symlink that escapes destination: {} -> {}",
-                                    entry_path.display(),
-                                    target.display()
-                                );
-                                continue;
-                            }
-                        }
-
-                        // Create parent directory
-                        if let Some(parent) = full_path.parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-
-                        // Create symlink (Unix) or copy (Windows)
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::symlink;
-                            if full_path.exists() || full_path.symlink_metadata().is_ok() {
-                                fs::remove_file(&full_path)?;
-                            }
-                            symlink(target, &full_path)?;
-                        }
-
-                        #[cfg(windows)]
-                        {
-                            // On Windows, we'll skip symlinks or try to copy instead
-                            debug!("Skipping symlink on Windows: {}", entry_path.display());
-                        }
+            tar::EntryType::Symlink => {
+                let target = match entry.link_name() {
+                    Ok(Some(target)) => target.into_owned(),
+                    Ok(None) => {
+                        warn!("Skipping symlink without target: {}", entry_path.display());
+                        continue;
                     }
+                    Err(err) => {
+                        warn!(
+                            "Skipping symlink with unreadable target {}: {}",
+                            entry_path.display(),
+                            err
+                        );
+                        continue;
+                    }
+                };
+
+                if let Err(err) = validate_symlink_target(&target, &sanitized_path) {
+                    warn!(
+                        "Skipping potentially malicious symlink {} -> {}: {}",
+                        entry_path.display(),
+                        target.display(),
+                        err
+                    );
+                    continue;
                 }
+
+                if let Some(parent) = full_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::symlink;
+
+                    remove_existing_path(&full_path)?;
+                    symlink(&target, &full_path)?;
+                }
+
+                #[cfg(windows)]
+                {
+                    debug!("Skipping symlink on Windows: {}", entry_path.display());
+                }
+            }
+            tar::EntryType::Link => {
+                let target = match entry.link_name() {
+                    Ok(Some(target)) => target.into_owned(),
+                    Ok(None) => {
+                        warn!(
+                            "Skipping hard link without target: {}",
+                            entry_path.display()
+                        );
+                        continue;
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Skipping hard link with unreadable target {}: {}",
+                            entry_path.display(),
+                            err
+                        );
+                        continue;
+                    }
+                };
+
+                let source = match validate_hard_link_target(dest, &target, &sanitized_path) {
+                    Ok(source) => source,
+                    Err(err) => {
+                        warn!(
+                            "Skipping potentially malicious hard link {} -> {}: {}",
+                            entry_path.display(),
+                            target.display(),
+                            err
+                        );
+                        continue;
+                    }
+                };
+
+                if let Some(parent) = full_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                remove_existing_path(&full_path)?;
+                fs::hard_link(&source, &full_path)?;
             }
             _ => {
                 debug!(
@@ -348,12 +546,13 @@ pub fn safe_extract_zip_with_strip(
             let mut outfile = File::create(&full_path)?;
             io::copy(&mut file, &mut outfile)?;
 
-            // Preserve permissions on Unix
+            // Preserve permissions on Unix, but strip SUID/SGID/sticky
+            // bits so a malicious zip cannot install a setuid binary.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 if let Some(mode) = file.unix_mode() {
-                    let permissions = fs::Permissions::from_mode(mode);
+                    let permissions = fs::Permissions::from_mode(mode & 0o777);
                     fs::set_permissions(&full_path, permissions)?;
                 }
             }
@@ -366,6 +565,8 @@ pub fn safe_extract_zip_with_strip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::io;
 
     use tempfile::tempdir;
 
@@ -437,5 +638,137 @@ mod tests {
         let extracted = dest.join("test/hello.txt");
         assert!(extracted.exists());
         assert_eq!(fs::read_to_string(extracted).unwrap(), "hello world");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_safe_unpack_tar_strips_setuid_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().unwrap();
+        let dest = temp.path().join("extract");
+        fs::create_dir_all(&dest).unwrap();
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let data = b"suid payload";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("pkg/setuid.bin").unwrap();
+        header.set_size(data.len() as u64);
+        // SUID + SGID + sticky + world-exec
+        header.set_mode(0o7755);
+        header.set_cksum();
+        builder.append(&header, &data[..]).unwrap();
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = tar::Archive::new(&tar_data[..]);
+        safe_unpack_tar(&mut archive, &dest).unwrap();
+
+        let extracted = dest.join("pkg/setuid.bin");
+        let mode = fs::metadata(&extracted).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(
+            mode & 0o7000,
+            0,
+            "SUID/SGID/sticky bits must be stripped, got {:o}",
+            mode
+        );
+        assert_eq!(mode & 0o777, 0o755, "standard permissions must survive");
+    }
+
+    #[test]
+    fn test_safe_unpack_tar_rejects_absolute_symlink_targets() {
+        let temp = tempdir().unwrap();
+        let dest = temp.path().join("extract");
+        fs::create_dir_all(&dest).unwrap();
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_path("pkg/link").unwrap();
+        header.set_link_name("/etc/passwd").unwrap();
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_cksum();
+        builder.append(&header, io::empty()).unwrap();
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = tar::Archive::new(&tar_data[..]);
+        safe_unpack_tar(&mut archive, &dest).unwrap();
+
+        assert!(dest.join("pkg/link").symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn test_safe_unpack_tar_rejects_absolute_hard_link_targets() {
+        let temp = tempdir().unwrap();
+        let dest = temp.path().join("extract");
+        fs::create_dir_all(&dest).unwrap();
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let data = b"hello world";
+        let mut file_header = tar::Header::new_gnu();
+        file_header.set_path("pkg/hello.txt").unwrap();
+        file_header.set_size(data.len() as u64);
+        file_header.set_mode(0o644);
+        file_header.set_cksum();
+        builder.append(&file_header, &data[..]).unwrap();
+
+        let mut link_header = tar::Header::new_gnu();
+        link_header.set_entry_type(tar::EntryType::Link);
+        link_header.set_path("pkg/escape.txt").unwrap();
+        link_header.set_link_name("/etc/passwd").unwrap();
+        link_header.set_size(0);
+        link_header.set_mode(0o644);
+        link_header.set_cksum();
+        builder.append(&link_header, io::empty()).unwrap();
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = tar::Archive::new(&tar_data[..]);
+        safe_unpack_tar(&mut archive, &dest).unwrap();
+
+        assert!(dest.join("pkg/hello.txt").exists());
+        assert!(!dest.join("pkg/escape.txt").exists());
+    }
+
+    #[test]
+    fn test_safe_unpack_tar_creates_internal_hard_links() {
+        let temp = tempdir().unwrap();
+        let dest = temp.path().join("extract");
+        fs::create_dir_all(&dest).unwrap();
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let data = b"payload";
+        let mut file_header = tar::Header::new_gnu();
+        file_header.set_path("pkg/target.txt").unwrap();
+        file_header.set_size(data.len() as u64);
+        file_header.set_mode(0o644);
+        file_header.set_cksum();
+        builder.append(&file_header, &data[..]).unwrap();
+
+        let mut link_header = tar::Header::new_gnu();
+        link_header.set_entry_type(tar::EntryType::Link);
+        link_header.set_path("pkg/link.txt").unwrap();
+        link_header.set_link_name("pkg/target.txt").unwrap();
+        link_header.set_size(0);
+        link_header.set_mode(0o644);
+        link_header.set_cksum();
+        builder.append(&link_header, io::empty()).unwrap();
+
+        let tar_data = builder.into_inner().unwrap();
+        let mut archive = tar::Archive::new(&tar_data[..]);
+        safe_unpack_tar(&mut archive, &dest).unwrap();
+
+        let target = dest.join("pkg/target.txt");
+        let link = dest.join("pkg/link.txt");
+        assert_eq!(fs::read(&target).unwrap(), b"payload");
+        assert_eq!(fs::read(&link).unwrap(), b"payload");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let target_meta = fs::metadata(target).unwrap();
+            let link_meta = fs::metadata(link).unwrap();
+            assert_eq!(target_meta.ino(), link_meta.ino());
+        }
     }
 }

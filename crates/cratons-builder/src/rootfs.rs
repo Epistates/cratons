@@ -11,16 +11,16 @@ use crate::config::BuildConfig;
 /// Builder for container root filesystems.
 pub struct RootfsBuilder<'a> {
     store: &'a Store,
-    store_mount_point: &'a Path,
+    store_reference_root: &'a Path,
 }
 
 impl<'a> RootfsBuilder<'a> {
     /// Create a new rootfs builder.
     #[must_use]
-    pub fn new(store: &'a Store, store_mount_point: &'a Path) -> Self {
+    pub fn new(store: &'a Store, store_reference_root: &'a Path) -> Self {
         Self {
             store,
-            store_mount_point,
+            store_reference_root,
         }
     }
 
@@ -136,20 +136,20 @@ impl<'a> RootfsBuilder<'a> {
                     e
                 )))
             })?;
-            let container_path = self.store_mount_point.join(relative_path);
+            let linked_path = self.store_reference_root.join(relative_path);
 
             let target = rootfs.join("toolchain").join(name);
             fs::create_dir_all(target.parent().unwrap())?;
 
             #[cfg(unix)]
-            std::os::unix::fs::symlink(&container_path, &target)?;
+            std::os::unix::fs::symlink(&linked_path, &target)?;
             #[cfg(windows)]
-            std::os::windows::fs::symlink_dir(&container_path, &target)?;
+            std::os::windows::fs::symlink_dir(&linked_path, &target)?;
 
             debug!(
                 "Linked toolchain {} -> {} (host: {})",
                 name,
-                container_path.display(),
+                linked_path.display(),
                 tc_path.display()
             );
         }
@@ -170,19 +170,19 @@ impl<'a> RootfsBuilder<'a> {
                     e
                 )))
             })?;
-            let container_path = self.store_mount_point.join(relative_path);
+            let linked_path = self.store_reference_root.join(relative_path);
 
             let target = deps_dir.join(name);
 
             #[cfg(unix)]
-            std::os::unix::fs::symlink(&container_path, &target)?;
+            std::os::unix::fs::symlink(&linked_path, &target)?;
             #[cfg(windows)]
-            std::os::windows::fs::symlink_dir(&container_path, &target)?;
+            std::os::windows::fs::symlink_dir(&linked_path, &target)?;
 
             debug!(
                 "Linked dependency {} -> {} (host: {})",
                 name,
-                container_path.display(),
+                linked_path.display(),
                 dep_path.display()
             );
         }

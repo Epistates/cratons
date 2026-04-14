@@ -185,9 +185,7 @@ fn hard_link_traversal_rejected_npm() {
         .expect_err("malicious hardlink must be rejected");
     let msg = err.to_string();
     assert!(
-        msg.contains("Hard link")
-            || msg.contains("hard link")
-            || msg.contains("Absolute"),
+        msg.contains("Hard link") || msg.contains("hard link") || msg.contains("Absolute"),
         "expected hard-link rejection, got: {msg}"
     );
 }
@@ -307,9 +305,7 @@ fn absolute_symlink_rejected_before_hardlink_runs() {
         .expect_err("absolute symlink target must be rejected");
     let msg = err.to_string();
     assert!(
-        msg.contains("Absolute symlink")
-            || msg.contains("symlink")
-            || msg.contains("escapes"),
+        msg.contains("Absolute symlink") || msg.contains("symlink") || msg.contains("escapes"),
         "expected symlink rejection, got: {msg}"
     );
 }

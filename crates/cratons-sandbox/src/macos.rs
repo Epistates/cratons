@@ -389,6 +389,7 @@ impl Sandbox for MacOsSandbox {
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
         // SECURITY: Always start with clean environment
         cmd.env_clear();
@@ -514,7 +515,10 @@ fn get_child_resource_usage() -> Option<crate::result::ResourceUsage> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::process::Command as StdCommand;
     use std::time::Duration;
+    use tempfile::tempdir;
+    use tokio::time::sleep;
 
     #[tokio::test]
     async fn test_simple_command() {
@@ -549,6 +553,53 @@ mod tests {
 
         let result = sandbox.execute(&config).await.unwrap();
         assert!(result.timed_out);
+    }
+
+    #[tokio::test]
+    async fn test_timeout_terminates_child() {
+        let sandbox = MacOsSandbox::new();
+        if !sandbox.is_available() {
+            return;
+        }
+
+        let temp = tempdir().unwrap();
+        let pid_file = temp.path().join("child.pid");
+
+        let mut config = SandboxConfig::new(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf '%s' $$ > \"$1\"; exec sleep 10".into(),
+            "sh".into(),
+            pid_file.display().to_string(),
+        ])
+        .with_workdir(temp.path().to_path_buf());
+        config.limits.timeout = Some(Duration::from_millis(100));
+
+        let result = sandbox.execute(&config).await.unwrap();
+        assert!(result.timed_out);
+
+        let mut pid = None;
+        for _ in 0..20 {
+            if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+                if let Ok(parsed) = contents.trim().parse::<u32>() {
+                    pid = Some(parsed);
+                    break;
+                }
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+        let pid = pid.expect("sandboxed child should have written its pid");
+
+        sleep(Duration::from_millis(100)).await;
+        let status = StdCommand::new("/bin/kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "timed-out sandbox child process {pid} should have been terminated"
+        );
     }
 
     #[tokio::test]

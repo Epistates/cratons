@@ -27,6 +27,7 @@ walkdir = { workspace = true }
 chrono = { workspace = true }
 petgraph = { workspace = true }
 futures = { workspace = true }
+glob = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

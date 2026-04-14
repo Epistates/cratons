@@ -42,6 +42,7 @@ pub fn build_command(config: &SandboxConfig) -> TokioCommand {
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    cmd.kill_on_drop(true);
 
     // Environment handling
     if !config.inherit_env {
@@ -89,6 +90,7 @@ pub async fn execute_command(
     timeout_duration: Option<Duration>,
 ) -> Result<ExecutionOutput, SandboxError> {
     let start = Instant::now();
+    cmd.kill_on_drop(true);
 
     // Execute with optional timeout
     let output = if let Some(timeout_dur) = timeout_duration {
@@ -125,6 +127,7 @@ pub async fn execute_command_with_rusage(
     use std::os::unix::process::ExitStatusExt;
 
     let start = Instant::now();
+    cmd.kill_on_drop(true);
 
     // Spawn the child
     let child = cmd.spawn().map_err(|e| map_io_error(e, &cmd))?;
@@ -134,9 +137,6 @@ pub async fn execute_command_with_rusage(
         match timeout(timeout_dur, child.wait_with_output()).await {
             Ok(result) => result.map_err(SandboxError::Io)?,
             Err(_elapsed) => {
-                // Note: The child process may still be running, but we can't kill it
-                // after wait_with_output times out because tokio drops the child.
-                // The process will be orphaned and eventually cleaned up by init.
                 debug!(timeout = ?timeout_dur, "Process timed out");
                 return Ok((ExecutionOutput::timeout(start.elapsed()), None));
             }
@@ -309,6 +309,10 @@ pub fn log_unsupported_features(config: &SandboxConfig, sandbox_name: &str) {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::process::Command as StdCommand;
+    use tempfile::tempdir;
+    use tokio::process::Command as TokioCommand;
+    use tokio::time::sleep;
 
     #[test]
     fn test_build_command() {
@@ -337,5 +341,50 @@ mod tests {
         let output = ExecutionOutput::timeout(Duration::from_secs(1));
         assert!(output.timed_out);
         assert_eq!(output.exit_code, 124);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_timeout_kills_direct_child_process() {
+        let temp = tempdir().unwrap();
+        let pid_file = temp.path().join("child.pid");
+
+        let mut cmd = TokioCommand::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("printf '%s' $$ > \"$1\"; exec sleep 10")
+            .arg("sh")
+            .arg(&pid_file)
+            .current_dir("/tmp")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let (output, _) = execute_command_with_rusage(cmd, Some(Duration::from_millis(100)))
+            .await
+            .unwrap();
+        assert!(output.timed_out);
+
+        let mut pid = None;
+        for _ in 0..20 {
+            if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+                if let Ok(parsed) = contents.trim().parse::<u32>() {
+                    pid = Some(parsed);
+                    break;
+                }
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+        let pid = pid.expect("shell should have written its pid before timing out");
+
+        sleep(Duration::from_millis(100)).await;
+        let status = StdCommand::new("/bin/kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "timed-out child process {pid} should have been terminated"
+        );
     }
 }

@@ -608,8 +608,7 @@ impl PackageExtractor {
                 // silently dropped the entry, leaving packages half-extracted
                 // and giving a false sense of containment.
                 if let Some(ref target) = link_name {
-                    let resolved =
-                        Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
+                    let resolved = Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
                     #[cfg(any(unix, windows))]
                     {
                         if dest_path.exists() {
@@ -751,8 +750,7 @@ impl PackageExtractor {
             } else if entry_type.is_hard_link() {
                 // Hard links: validated against canonical_dest and materialized.
                 if let Some(ref target) = link_name {
-                    let resolved =
-                        Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
+                    let resolved = Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
                     #[cfg(any(unix, windows))]
                     {
                         if dest_path.exists() {
@@ -930,8 +928,7 @@ impl PackageExtractor {
             } else if entry_type.is_hard_link() {
                 // Hard links: validated against canonical_dest and materialized.
                 if let Some(ref target) = link_name {
-                    let resolved =
-                        Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
+                    let resolved = Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
                     #[cfg(any(unix, windows))]
                     {
                         if dest_path.exists() {
@@ -1232,8 +1229,7 @@ impl PackageExtractor {
             } else if entry_type.is_hard_link() {
                 // Hard links: validated against canonical_dest and materialized.
                 if let Some(ref target) = link_name {
-                    let resolved =
-                        Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
+                    let resolved = Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
                     #[cfg(any(unix, windows))]
                     {
                         if dest_path.exists() {
@@ -1368,8 +1364,7 @@ impl PackageExtractor {
                 }
             } else if entry_type.is_hard_link() {
                 if let Some(ref target) = link_name {
-                    let resolved =
-                        Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
+                    let resolved = Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
                     #[cfg(any(unix, windows))]
                     {
                         if dest_path.exists() {
@@ -1615,8 +1610,7 @@ mod tests {
         symlink(outside.path(), &link_path).unwrap();
 
         let ctx = ExtractContext::new(dest.path()).unwrap();
-        let result =
-            PackageExtractor::validate_path_ctx(&ctx, Path::new("escape/new-file.txt"));
+        let result = PackageExtractor::validate_path_ctx(&ctx, Path::new("escape/new-file.txt"));
         assert!(result.is_err());
     }
 }

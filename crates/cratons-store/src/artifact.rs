@@ -6,6 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
+/// Canonical manifest filename stored alongside an artifact directory.
+pub const ARTIFACT_MANIFEST_NAME: &str = "cratons-manifest.json";
+
 /// Metadata about a built artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactManifest {
@@ -19,6 +22,9 @@ pub struct ArtifactManifest {
     pub built_at: chrono::DateTime<chrono::Utc>,
     /// Build duration in seconds
     pub build_duration_secs: f64,
+    /// Hash of the captured build outputs before the manifest was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_hash: Option<ContentHash>,
     /// Environment variables used in build
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<(String, String)>,
@@ -37,10 +43,49 @@ impl ArtifactManifest {
             version,
             built_at: chrono::Utc::now(),
             build_duration_secs: 0.0,
+            output_hash: None,
             env: Vec::new(),
             toolchains: std::collections::HashMap::new(),
         }
     }
+}
+
+/// Hash stored artifact contents while excluding the store-managed root manifest.
+///
+/// This is used when verifying or re-hashing artifact directories after they
+/// have already been written to disk with `cratons-manifest.json` at the root.
+pub fn hash_artifact_contents(path: &Path) -> Result<ContentHash> {
+    hash_artifact_contents_with(path, HashAlgorithm::Blake3)
+}
+
+/// Hash stored artifact contents with an explicit algorithm.
+pub fn hash_artifact_contents_with(path: &Path, algorithm: HashAlgorithm) -> Result<ContentHash> {
+    use walkdir::WalkDir;
+
+    let root_manifest = path.join(ARTIFACT_MANIFEST_NAME);
+    let mut entries: Vec<_> = WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_type().is_file() && entry.path() != root_manifest.as_path())
+        .collect();
+    entries.sort_by(|a, b| a.path().cmp(b.path()));
+
+    let mut hasher = Hasher::new(algorithm);
+    for entry in entries {
+        let relative = entry
+            .path()
+            .strip_prefix(path)
+            .map_err(|e| cratons_core::CratonsError::Io(std::io::Error::other(e.to_string())))?;
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update(b"\0");
+
+        let file_hash = Hasher::hash_file(algorithm, entry.path())?;
+        hasher.update(file_hash.value.as_bytes());
+        hasher.update(b"\0");
+    }
+
+    Ok(hasher.finalize())
 }
 
 /// A stored artifact.
@@ -88,7 +133,25 @@ impl ArtifactStore {
     /// Store an artifact from a build output directory.
     pub fn store(&self, manifest: &ArtifactManifest, output_dir: &Path) -> Result<ContentHash> {
         // Compute hash of the output directory
-        let output_hash = Hasher::hash_directory(HashAlgorithm::Blake3, output_dir)?;
+        let output_hash = hash_artifact_contents_with(
+            output_dir,
+            manifest
+                .output_hash
+                .as_ref()
+                .map(|hash| hash.algorithm)
+                .unwrap_or(HashAlgorithm::Blake3),
+        )?;
+        if let Some(expected_output_hash) = &manifest.output_hash {
+            if expected_output_hash != &output_hash {
+                return Err(cratons_core::CratonsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "artifact output hash mismatch: manifest={}, actual={}",
+                        expected_output_hash, output_hash
+                    ),
+                )));
+            }
+        }
 
         // Create artifact directory
         let artifact_dir = self.root.join(format!(
@@ -108,7 +171,7 @@ impl ArtifactStore {
         copy_dir_contents(output_dir, &artifact_dir)?;
 
         // Write manifest
-        let manifest_path = artifact_dir.join("cratons-manifest.json");
+        let manifest_path = artifact_dir.join(ARTIFACT_MANIFEST_NAME);
         let manifest_json = serde_json::to_string_pretty(manifest)?;
         fs::write(manifest_path, manifest_json)?;
 
@@ -142,7 +205,7 @@ impl ArtifactStore {
     /// Load an artifact with its manifest.
     pub fn load(&self, input_hash: &ContentHash) -> Result<Option<Artifact>> {
         if let Some(path) = self.get(input_hash) {
-            let manifest_path = path.join("cratons-manifest.json");
+            let manifest_path = path.join(ARTIFACT_MANIFEST_NAME);
             if manifest_path.exists() {
                 let manifest_json = fs::read_to_string(manifest_path)?;
                 let manifest: ArtifactManifest = serde_json::from_str(&manifest_json)?;
@@ -164,7 +227,7 @@ impl ArtifactStore {
         if let Ok(entries) = fs::read_dir(&self.root) {
             for entry in entries.filter_map(|e| e.ok()) {
                 if entry.path().is_dir() {
-                    let manifest_path = entry.path().join("cratons-manifest.json");
+                    let manifest_path = entry.path().join(ARTIFACT_MANIFEST_NAME);
                     if manifest_path.exists() {
                         if let Ok(manifest_json) = fs::read_to_string(&manifest_path) {
                             if let Ok(manifest) = serde_json::from_str(&manifest_json) {
@@ -231,6 +294,36 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_hash_artifact_contents_ignores_root_manifest() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("artifact.bin"), b"payload").unwrap();
+        fs::create_dir_all(temp.path().join("nested")).unwrap();
+        fs::write(
+            temp.path().join("nested").join(ARTIFACT_MANIFEST_NAME),
+            b"nested payload",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join(ARTIFACT_MANIFEST_NAME),
+            b"{\"package\":\"x\"}",
+        )
+        .unwrap();
+
+        let compare = tempdir().unwrap();
+        fs::write(compare.path().join("artifact.bin"), b"payload").unwrap();
+        fs::create_dir_all(compare.path().join("nested")).unwrap();
+        fs::write(
+            compare.path().join("nested").join(ARTIFACT_MANIFEST_NAME),
+            b"nested payload",
+        )
+        .unwrap();
+
+        let actual = hash_artifact_contents(temp.path()).unwrap();
+        let expected = Hasher::hash_directory(HashAlgorithm::Blake3, compare.path()).unwrap();
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn test_artifact_store() {

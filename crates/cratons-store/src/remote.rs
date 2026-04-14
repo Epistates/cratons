@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tracing::{debug, info, warn};
 
-use crate::artifact::{Artifact, ArtifactStore};
+use crate::artifact::{
+    ARTIFACT_MANIFEST_NAME, Artifact, ArtifactStore, hash_artifact_contents_with,
+};
 
 // AWS SDK imports
 use aws_credential_types::Credentials;
@@ -1070,7 +1072,7 @@ impl RemoteCache {
     /// This checks that the manifest's input_hash matches what we requested,
     /// preventing a malicious remote cache from serving incorrect artifacts.
     fn verify_downloaded_artifact(path: &Path, expected_hash: &ContentHash) -> Result<()> {
-        let manifest_path = path.join("cratons-manifest.json");
+        let manifest_path = path.join(ARTIFACT_MANIFEST_NAME);
 
         if !manifest_path.exists() {
             return Err(CratonsError::ChecksumMismatch {
@@ -1107,6 +1109,39 @@ impl RemoteCache {
                 actual: format!(
                     "{:?}:{}",
                     manifest.input_hash.algorithm, manifest.input_hash.value
+                ),
+            });
+        }
+
+        let expected_output_hash =
+            manifest
+                .output_hash
+                .clone()
+                .ok_or_else(|| CratonsError::ChecksumMismatch {
+                    package: format!("{}@{}", manifest.package, manifest.version),
+                    expected: "artifact payload hash in manifest".to_string(),
+                    actual: "manifest missing output_hash".to_string(),
+                })?;
+        let actual_output_hash = hash_artifact_contents_with(path, expected_output_hash.algorithm)
+            .map_err(|e| CratonsError::ChecksumMismatch {
+                package: format!("{}@{}", manifest.package, manifest.version),
+                expected: format!(
+                    "{:?}:{}",
+                    expected_output_hash.algorithm, expected_output_hash.value
+                ),
+                actual: format!("failed to hash downloaded payload: {e}"),
+            })?;
+
+        if actual_output_hash != expected_output_hash {
+            return Err(CratonsError::ChecksumMismatch {
+                package: format!("{}@{}", manifest.package, manifest.version),
+                expected: format!(
+                    "{:?}:{}",
+                    expected_output_hash.algorithm, expected_output_hash.value
+                ),
+                actual: format!(
+                    "{:?}:{}",
+                    actual_output_hash.algorithm, actual_output_hash.value
                 ),
             });
         }
@@ -1198,7 +1233,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::ArtifactManifest;
+    use crate::artifact::{ArtifactManifest, hash_artifact_contents};
     use tempfile::tempdir;
 
     #[test]
@@ -1409,5 +1444,76 @@ mod tests {
         // This will either succeed from env vars or fail if env vars aren't set
         // The test passes as long as it doesn't panic
         let _ = result;
+    }
+
+    #[test]
+    fn test_verify_downloaded_artifact_checks_payload_hash() {
+        let artifact_dir = tempdir().unwrap();
+        fs::write(artifact_dir.path().join("artifact.bin"), b"payload").unwrap();
+
+        let input_hash = ContentHash::blake3("test_input".to_string());
+        let output_hash = hash_artifact_contents(artifact_dir.path()).unwrap();
+        let mut manifest = ArtifactManifest::new(
+            input_hash.clone(),
+            "test-pkg".to_string(),
+            "1.0.0".to_string(),
+        );
+        manifest.output_hash = Some(output_hash);
+        fs::write(
+            artifact_dir.path().join(ARTIFACT_MANIFEST_NAME),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        RemoteCache::verify_downloaded_artifact(artifact_dir.path(), &input_hash)
+            .expect("matching payload hash must validate");
+    }
+
+    #[test]
+    fn test_verify_downloaded_artifact_rejects_tampered_payload() {
+        let artifact_dir = tempdir().unwrap();
+        fs::write(artifact_dir.path().join("artifact.bin"), b"payload").unwrap();
+
+        let input_hash = ContentHash::blake3("test_input".to_string());
+        let output_hash = hash_artifact_contents(artifact_dir.path()).unwrap();
+        let mut manifest = ArtifactManifest::new(
+            input_hash.clone(),
+            "test-pkg".to_string(),
+            "1.0.0".to_string(),
+        );
+        manifest.output_hash = Some(output_hash);
+        fs::write(
+            artifact_dir.path().join(ARTIFACT_MANIFEST_NAME),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        fs::write(artifact_dir.path().join("artifact.bin"), b"tampered").unwrap();
+
+        let err = RemoteCache::verify_downloaded_artifact(artifact_dir.path(), &input_hash)
+            .expect_err("tampered payload must be rejected");
+        assert!(matches!(err, CratonsError::ChecksumMismatch { .. }));
+    }
+
+    #[test]
+    fn test_verify_downloaded_artifact_requires_output_hash() {
+        let artifact_dir = tempdir().unwrap();
+        fs::write(artifact_dir.path().join("artifact.bin"), b"payload").unwrap();
+
+        let input_hash = ContentHash::blake3("test_input".to_string());
+        let manifest = ArtifactManifest::new(
+            input_hash.clone(),
+            "test-pkg".to_string(),
+            "1.0.0".to_string(),
+        );
+        fs::write(
+            artifact_dir.path().join(ARTIFACT_MANIFEST_NAME),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let err = RemoteCache::verify_downloaded_artifact(artifact_dir.path(), &input_hash)
+            .expect_err("remote artifacts without output_hash must be rejected");
+        assert!(matches!(err, CratonsError::ChecksumMismatch { .. }));
     }
 }
