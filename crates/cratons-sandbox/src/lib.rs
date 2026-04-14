@@ -8,7 +8,13 @@
 //! - Job Objects/AppContainer on Windows
 //! - Graceful degradation to process isolation where needed
 
-#![forbid(unsafe_code)]
+// Unsafe code is denied crate-wide by default. The Windows backend
+// (`windows.rs`) wraps Win32 Job Object FFI and re-enables `unsafe` with a
+// module-scoped `#![allow(unsafe_code)]` plus SAFETY doc comments on every
+// block. `clippy::undocumented_unsafe_blocks` enforces that new `unsafe`
+// cannot be added anywhere in the crate without a SAFETY justification.
+#![deny(unsafe_code)]
+#![warn(clippy::undocumented_unsafe_blocks)]
 #![warn(missing_docs)]
 
 pub mod config;
@@ -79,9 +85,15 @@ impl IsolationLevel {
     }
 
     /// Check if this isolation level provides network isolation.
+    ///
+    /// Includes `OsSandbox` because macOS `sandbox-exec` can enforce
+    /// `(deny network*)` via SBPL, which is the network-hermetic guarantee
+    /// cratons needs for post-install scripts. Windows Job Objects do not
+    /// have an equivalent (network isolation there requires AppContainer,
+    /// which is tracked as a separate isolation level).
     #[must_use]
     pub fn has_network_isolation(&self) -> bool {
-        matches!(self, Self::Container | Self::Vm)
+        matches!(self, Self::Container | Self::Vm | Self::OsSandbox)
     }
 
     /// Check if this isolation level provides resource limits.
@@ -270,7 +282,10 @@ mod tests {
         assert!(IsolationLevel::Vm.has_resource_limits());
 
         assert!(IsolationLevel::OsSandbox.has_filesystem_isolation());
-        assert!(!IsolationLevel::OsSandbox.has_network_isolation());
+        // OsSandbox now reports network isolation because macOS
+        // `sandbox-exec` enforces `(deny network*)` via SBPL (Phase 3
+        // plat­form correction).
+        assert!(IsolationLevel::OsSandbox.has_network_isolation());
         assert!(IsolationLevel::OsSandbox.has_resource_limits());
 
         assert!(!IsolationLevel::Process.has_filesystem_isolation());

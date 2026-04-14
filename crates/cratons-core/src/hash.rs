@@ -20,24 +20,28 @@ use crate::error::{CratonsError, Result};
 
 /// Constant-time byte slice comparison.
 ///
-/// # Security
+/// Compares two byte slices in constant time relative to their content, meaning
+/// the time taken does not depend on where (or whether) the slices differ. This
+/// prevents timing attacks where an attacker could infer information about secret
+/// data by measuring comparison time.
 ///
-/// This function compares two byte slices in constant time, meaning the time
-/// taken is independent of where the slices differ. This prevents timing attacks
-/// where an attacker can infer information about secret data by measuring
-/// comparison time.
+/// The length check is not constant-time, but this is not a security concern in
+/// practice because the use sites in cratons (hash digests, hex-encoded digests)
+/// all have fixed lengths known to the attacker.
 ///
-/// # Returns
+/// # Examples
 ///
-/// `true` if the slices are equal (same length and same contents), `false` otherwise.
+/// ```
+/// use cratons_core::constant_time_eq;
+/// assert!(constant_time_eq(b"abc", b"abc"));
+/// assert!(!constant_time_eq(b"abc", b"abd"));
+/// assert!(!constant_time_eq(b"abc", b"abcd"));
+/// ```
 #[inline]
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    // Length check is not constant-time, but length differences are not
-    // typically a security concern for hash comparison (hashes are fixed-length)
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    // Use subtle crate for constant-time comparison
     a.ct_eq(b).into()
 }
 

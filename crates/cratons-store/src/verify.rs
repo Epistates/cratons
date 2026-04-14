@@ -29,7 +29,7 @@ use pgp::types::KeyDetails;
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
-use cratons_core::{CratonsError, Result};
+use cratons_core::{CratonsError, Result, constant_time_eq};
 
 /// Verification result with details about what was checked.
 #[derive(Debug, Clone)]
@@ -125,13 +125,21 @@ impl ToolchainVerifier {
         }
     }
 
-    /// Verify artifact bytes against expected checksum.
+    /// Verify artifact bytes against expected SHA-256 checksum.
+    ///
+    /// The comparison is constant-time relative to the digest content. Both
+    /// sides are normalized to lowercase hex before the compare — this is a
+    /// byte-wise transform on attacker-known data (fixed-width hex digests)
+    /// and leaks nothing.
     pub fn verify_sha256(&self, data: &[u8], expected: &str) -> Result<VerificationResult> {
         let mut hasher = Sha256::new();
         hasher.update(data);
         let actual = hex::encode(hasher.finalize());
 
-        if actual.eq_ignore_ascii_case(expected) {
+        let actual_lc = actual.to_ascii_lowercase();
+        let expected_lc = expected.to_ascii_lowercase();
+
+        if constant_time_eq(actual_lc.as_bytes(), expected_lc.as_bytes()) {
             debug!(hash = %actual, "SHA-256 checksum verified");
             Ok(VerificationResult {
                 verified: true,
@@ -1403,6 +1411,33 @@ mod tests {
 
         let result = verifier.verify_sha256(data, expected);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn sha256_verify_constant_time_smoke() {
+        // Correctness + behavior preservation for the constant-time
+        // compare: case-insensitive match must still succeed, and the
+        // error path must not hide mismatches.
+        let verifier = ToolchainVerifier::new();
+        let data = b"hello world";
+        let lower = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        let upper = "B94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9";
+        let mixed = "b94D27b9934d3e08A52e52d7da7dabfac484efe37a5380Ee9088F7ACE2EFCDE9";
+
+        assert!(verifier.verify_sha256(data, lower).unwrap().verified);
+        assert!(verifier.verify_sha256(data, upper).unwrap().verified);
+        assert!(verifier.verify_sha256(data, mixed).unwrap().verified);
+
+        // Wrong-length and wrong-content inputs must error.
+        assert!(verifier.verify_sha256(data, "deadbeef").is_err());
+        assert!(
+            verifier
+                .verify_sha256(
+                    data,
+                    "0000000000000000000000000000000000000000000000000000000000000000"
+                )
+                .is_err()
+        );
     }
 
     #[test]

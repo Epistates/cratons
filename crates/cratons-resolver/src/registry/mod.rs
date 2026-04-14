@@ -22,6 +22,7 @@
 
 mod crates;
 mod go;
+pub mod gosum;
 mod maven;
 mod npm;
 pub mod policy;

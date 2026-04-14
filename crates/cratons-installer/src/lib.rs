@@ -25,6 +25,7 @@ use petgraph::algo::toposort;
 use petgraph::graphmap::DiGraphMap;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -32,6 +33,110 @@ pub use download::PackageDownloader;
 pub use extract::PackageExtractor;
 pub use link::{PackageLinker, create_node_modules_structure};
 pub use scripts::{PackageScripts, PostInstallRunner};
+
+/// Policy for how post-install scripts interact with the platform sandbox.
+///
+/// Cratons treats post-install scripts as untrusted code (npm tarballs can
+/// ship arbitrary shell commands). This enum controls what happens when the
+/// host cannot provide the requested isolation — e.g. rootless Linux without
+/// user namespaces, macOS without `sandbox-exec`, or Windows with only Job
+/// Objects (which cannot isolate network or filesystem).
+///
+/// The default is [`SandboxPolicy::Required`]: **fail closed** unless the
+/// operator explicitly opts into a weaker mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SandboxPolicy {
+    /// The strongest mode, and the default. The installer derives the set
+    /// of capabilities the sandbox backend must provide from the
+    /// [`SandboxConfig`](cratons_sandbox::config::SandboxConfig) it intends
+    /// to build (e.g. network isolation for `NetworkAccess::None`, filesystem
+    /// isolation for scoped mounts, resource limits for
+    /// `ResourceLimits::for_post_install`). If the chosen backend cannot
+    /// provide every required capability, the install aborts with a
+    /// [`CratonsError::BuildFailed`] naming the missing capabilities. No
+    /// silent degradation.
+    #[default]
+    Required,
+    /// If a required capability is unavailable, emit a structured warning
+    /// listing the missing capabilities and fall back to running the script
+    /// directly on the host. This is the pre-Phase-3 behavior; it remains
+    /// available for operators who have weighed the tradeoff explicitly.
+    Preferred,
+    /// Never attempt to sandbox. The script runs directly on the host every
+    /// time. Use only in trusted environments where sandboxing would break
+    /// the intended semantics. Must be selected explicitly.
+    Disabled,
+}
+
+/// Policy governing how the installer enforces package integrity
+/// verification before persisting downloaded bytes.
+///
+/// Integrity here means "the registry attested a cryptographic hash for
+/// this package version, and the downloaded bytes match it." Cratons
+/// treats missing or mismatched integrity as a supply-chain failure: by
+/// default, the install aborts before any bytes are written to the CAS.
+///
+/// Two ecosystems currently lack a credible integrity story and are
+/// handled via the allowlist variant:
+///
+/// - **Go**: the Go module proxy returns an `origin.hash` that is not a
+///   trust anchor independent of the proxy itself. True integrity
+///   requires querying the `sum.golang.org` checksum database; that work
+///   is tracked as follow-up F-1.
+/// - **Maven Central**: the `.jar.sha1` is served from the same host as
+///   the JAR, so it only attests against transport corruption, not a
+///   compromised registry. PGP detached signature verification (F-2) is
+///   the proper fix.
+///
+/// Until those land, the default policy allows these two ecosystems to
+/// install with empty integrity — but it records a structured warning in
+/// `InstallResult.warnings` so downstream tooling (CI, audit) can catch
+/// the degradation explicitly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntegrityPolicy {
+    /// Fail any install where a downloaded package has empty registry
+    /// integrity. This is the strongest policy and will become the
+    /// default once Go and Maven have independent integrity anchors.
+    Required,
+    /// Require integrity for all ecosystems except the ones listed here.
+    /// Ecosystems in the allowlist emit a structured `integrity-degraded`
+    /// warning and proceed. This is the default, with `vec![Ecosystem::Go,
+    /// Ecosystem::Maven]`.
+    RequiredWithEcosystemAllowlist(Vec<Ecosystem>),
+    /// Skip integrity enforcement entirely. The installer still verifies
+    /// any non-empty integrity the registry does return, but tolerates an
+    /// empty value silently. Selected explicitly, never the default.
+    Skip,
+}
+
+impl Default for IntegrityPolicy {
+    /// **Default is `Required`** — fail closed for any ecosystem where the
+    /// registry returns empty integrity.
+    ///
+    /// Prior to F-final (F-1 Go sum.golang.org + F-2 Maven PGP), this
+    /// default was `RequiredWithEcosystemAllowlist([Go, Maven])` because
+    /// neither ecosystem had a credible cross-origin integrity source.
+    /// F-1 added signed-note verified `h1:` hashes for Go, and F-2 added
+    /// PGP verification for Maven (with hardcoded keyserver fetch and
+    /// on-disk cache). Both ecosystems now deliver real integrity, so
+    /// the default is strict.
+    fn default() -> Self {
+        Self::Required
+    }
+}
+
+impl IntegrityPolicy {
+    /// Returns `true` if an empty registry integrity string is acceptable
+    /// for a package in `ecosystem` under this policy. Non-empty integrity
+    /// is always verified downstream regardless of this check.
+    pub fn allows_empty_integrity(&self, ecosystem: Ecosystem) -> bool {
+        match self {
+            Self::Required => false,
+            Self::RequiredWithEcosystemAllowlist(list) => list.contains(&ecosystem),
+            Self::Skip => true,
+        }
+    }
+}
 
 /// Configuration for the installer.
 #[derive(Debug, Clone)]
@@ -43,10 +148,20 @@ pub struct InstallerConfig {
 
     /// Whether to fail on post-install script errors (default: false for compatibility)
     pub strict_scripts: bool,
-    /// Whether to run scripts in isolated containers
-    pub isolate_scripts: bool,
-    /// Skip integrity verification (dangerous!)
-    pub skip_integrity: bool,
+    /// Policy governing how (or whether) post-install scripts are isolated
+    /// from the host. See [`SandboxPolicy`].
+    pub sandbox_policy: SandboxPolicy,
+    /// Policy governing how the installer enforces package integrity.
+    /// See [`IntegrityPolicy`]. Replaces the legacy `skip_integrity: bool`.
+    pub integrity_policy: IntegrityPolicy,
+    /// Maven PGP trust configuration. Defaults to loading
+    /// `~/.config/cratons/trusted-keys/maven.toml` if it exists, else
+    /// empty. See [`cratons_security::MavenTrustConfig`]. Project-level
+    /// `[security.maven]` manifest parsing is tracked as F-2c follow-up.
+    pub maven_trust: Arc<cratons_security::MavenTrustConfig>,
+    /// Shared PGP key cache used by install-time Maven verification.
+    /// Opened on demand; see [`cratons_security::KeyStore`].
+    pub maven_keystore: Option<Arc<cratons_security::KeyStore>>,
     /// Link strategy for installed packages
     pub link_strategy: LinkStrategy,
     /// Ecosystems to install (None = all)
@@ -55,16 +170,43 @@ pub struct InstallerConfig {
 
 impl Default for InstallerConfig {
     fn default() -> Self {
+        // Best-effort load of the user-level Maven keyring. Failure to
+        // parse is fatal (bad config is worse than no config), but a
+        // missing file is silently treated as "empty keyring". Project-
+        // level config via `[security.maven]` in `cratons.toml` is a
+        // follow-up (F-2c).
+        let maven_trust = Arc::new(default_user_maven_trust());
         Self {
             concurrency: 8,
             run_scripts: true,
             strict_scripts: false,
-            isolate_scripts: true,
-            skip_integrity: false,
+            sandbox_policy: SandboxPolicy::Required,
+            integrity_policy: IntegrityPolicy::default(),
+            maven_trust,
+            maven_keystore: None,
             link_strategy: LinkStrategy::Symlink,
             ecosystems: None,
         }
     }
+}
+
+/// Load the default user-level Maven trust config from
+/// `~/.config/cratons/trusted-keys/maven.toml`, returning an empty config
+/// on `ENOENT` and panicking only on a malformed existing file.
+fn default_user_maven_trust() -> cratons_security::MavenTrustConfig {
+    let Some(base) = dirs::config_dir() else {
+        return cratons_security::MavenTrustConfig::default();
+    };
+    let path = base.join("cratons").join("trusted-keys").join("maven.toml");
+    cratons_security::MavenTrustConfig::load_or_default(&path)
+        .unwrap_or_else(|e| {
+            warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to load user Maven trust config; using empty default"
+            );
+            cratons_security::MavenTrustConfig::default()
+        })
 }
 
 /// Strategy for linking packages from CAS to project.
@@ -115,6 +257,11 @@ pub struct EcosystemResult {
     pub bytes: u64,
     /// Installation directory
     pub install_dir: Option<PathBuf>,
+    /// Structured warnings raised during installation of this ecosystem
+    /// (e.g. `integrity-degraded: <pkg>@<ver>` entries when a package was
+    /// installed under [`IntegrityPolicy::RequiredWithEcosystemAllowlist`]).
+    /// Aggregated into [`InstallResult::warnings`] by the top-level loop.
+    pub warnings: Vec<String>,
 }
 
 /// Status of a single package installation.
@@ -155,9 +302,15 @@ impl<'a> Installer<'a> {
             .build()
             .expect("Failed to create HTTP client");
 
+        let downloader = PackageDownloader::with_maven_trust(
+            client.clone(),
+            config.concurrency,
+            config.maven_trust.clone(),
+        );
+
         Self {
             store,
-            downloader: PackageDownloader::new(client.clone(), config.concurrency),
+            downloader,
             extractor: PackageExtractor::new(),
             config,
         }
@@ -214,6 +367,10 @@ impl<'a> Installer<'a> {
             result.packages_cached += eco_result.cached;
             result.packages_downloaded += eco_result.downloaded;
             result.bytes_downloaded += eco_result.bytes;
+
+            // Bubble per-ecosystem structured warnings up to the top-level
+            // result so CI/audit tooling can scrape them from one place.
+            result.warnings.extend(eco_result.warnings.iter().cloned());
 
             result.ecosystems.insert(ecosystem, eco_result);
         }
@@ -329,6 +486,13 @@ impl<'a> Installer<'a> {
     ) -> Result<EcosystemResult> {
         let mut eco_result = EcosystemResult::default();
 
+        // Enforce integrity policy BEFORE touching the network or CAS. Packages
+        // that the policy disallows never cause a network fetch, never allocate
+        // memory for bytes, and never land in the content-addressable store.
+        // Allowlisted empty integrity emits a structured warning that the
+        // top-level install loop aggregates into `InstallResult.warnings`.
+        self.enforce_integrity_policy(ecosystem, packages, &mut eco_result.warnings)?;
+
         // Determine installation directory
         let install_dir = self.get_install_dir(ecosystem, project_dir)?;
         std::fs::create_dir_all(&install_dir)?;
@@ -401,8 +565,13 @@ impl<'a> Installer<'a> {
                 // Extract the package
                 let extracted_path = self.extractor.extract(&path, pkg.ecosystem, self.store)?;
 
-                // Verify integrity if not skipped
-                if !self.config.skip_integrity && !pkg.integrity.is_empty() {
+                // Verify content-hash integrity after extraction. Empty
+                // integrity is already policy-gated earlier in
+                // `install_ecosystem`, so reaching this point with an empty
+                // value means the active policy allows it (Skip or
+                // allowlisted ecosystem). Only non-empty values trigger the
+                // post-extract hash check.
+                if !pkg.integrity.is_empty() {
                     self.verify_integrity(pkg, &extracted_path)?;
                 }
 
@@ -499,6 +668,56 @@ impl<'a> Installer<'a> {
 
     /// Verify package integrity after extraction.
     ///
+    /// Enforce the configured [`IntegrityPolicy`] against a slice of packages
+    /// for a given ecosystem, **before** any network fetch or CAS write.
+    ///
+    /// - Packages with non-empty registry integrity are always allowed;
+    ///   their byte-level verification happens downstream in
+    ///   `PackageDownloader::download`.
+    /// - Packages with empty registry integrity are gated by the active
+    ///   policy: rejected outright under `Required`, allowed-with-warning
+    ///   under `RequiredWithEcosystemAllowlist` if the ecosystem is on the
+    ///   list, allowed silently under `Skip`.
+    ///
+    /// Returns an error listing offending packages on the first policy
+    /// violation. Collects `integrity-degraded` warnings into `warnings`.
+    fn enforce_integrity_policy(
+        &self,
+        ecosystem: Ecosystem,
+        packages: &[&LockedPackage],
+        warnings: &mut Vec<String>,
+    ) -> Result<()> {
+        for pkg in packages {
+            if !pkg.integrity.is_empty() {
+                continue;
+            }
+
+            if self.config.integrity_policy.allows_empty_integrity(ecosystem) {
+                let msg = format!(
+                    "integrity-degraded: {}@{} ({:?}) installed without registry integrity; \
+                     ecosystem is on the allowlist. Follow-up: implement an independent \
+                     checksum/signature source (sum.golang.org for Go, PGP for Maven).",
+                    pkg.name, pkg.version, ecosystem
+                );
+                warn!(
+                    package = %pkg.name,
+                    version = %pkg.version,
+                    ecosystem = ?ecosystem,
+                    tag = "integrity-degraded",
+                    "installing package without registry integrity under allowlist policy"
+                );
+                warnings.push(msg);
+            } else {
+                return Err(CratonsError::ChecksumMismatch {
+                    package: format!("{}@{}", pkg.name, pkg.version),
+                    expected: "<registry-provided integrity>".to_string(),
+                    actual: "<empty>".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Note: Primary integrity verification (tarball hash) happens in download.rs
     /// before extraction. This function provides secondary verification for cached
     /// packages using our content-addressed store hash.
@@ -538,7 +757,7 @@ impl<'a> Installer<'a> {
             return Ok(());
         }
 
-        let runner = PostInstallRunner::new(self.config.isolate_scripts);
+        let runner = PostInstallRunner::new(self.config.sandbox_policy);
         let mut failures: Vec<(String, String, String)> = Vec::new();
 
         for pkg in packages {
@@ -600,10 +819,67 @@ mod tests {
         let config = InstallerConfig::default();
         assert_eq!(config.concurrency, 8);
         assert!(config.run_scripts);
-        assert!(config.isolate_scripts);
-        assert!(!config.skip_integrity);
+        assert_eq!(config.sandbox_policy, SandboxPolicy::Required);
+        // Post-F-final: default is fully strict. Go and Maven now have
+        // real cross-origin integrity (sum.golang.org signed notes / PGP)
+        // so neither needs to be allowlisted.
+        assert_eq!(config.integrity_policy, IntegrityPolicy::Required);
         assert_eq!(config.link_strategy, LinkStrategy::Symlink);
         assert!(config.ecosystems.is_none());
+    }
+
+    // ---- IntegrityPolicy matrix -----------------------------------------
+
+    #[test]
+    fn integrity_policy_required_rejects_all_ecosystems() {
+        let policy = IntegrityPolicy::Required;
+        for eco in [
+            Ecosystem::Npm,
+            Ecosystem::PyPi,
+            Ecosystem::Crates,
+            Ecosystem::Go,
+            Ecosystem::Maven,
+            Ecosystem::Url,
+        ] {
+            assert!(!policy.allows_empty_integrity(eco), "{:?}", eco);
+        }
+    }
+
+    #[test]
+    fn integrity_policy_skip_allows_all_ecosystems() {
+        let policy = IntegrityPolicy::Skip;
+        for eco in [
+            Ecosystem::Npm,
+            Ecosystem::PyPi,
+            Ecosystem::Crates,
+            Ecosystem::Go,
+            Ecosystem::Maven,
+            Ecosystem::Url,
+        ] {
+            assert!(policy.allows_empty_integrity(eco), "{:?}", eco);
+        }
+    }
+
+    #[test]
+    fn integrity_policy_default_is_strict_for_every_ecosystem() {
+        // Post-F-final: the default is `Required`, which rejects empty
+        // integrity for every ecosystem. Historical test name preserved
+        // in CHANGELOG; assertion inverted.
+        let policy = IntegrityPolicy::default();
+        assert!(!policy.allows_empty_integrity(Ecosystem::Go));
+        assert!(!policy.allows_empty_integrity(Ecosystem::Maven));
+        assert!(!policy.allows_empty_integrity(Ecosystem::Npm));
+        assert!(!policy.allows_empty_integrity(Ecosystem::PyPi));
+        assert!(!policy.allows_empty_integrity(Ecosystem::Crates));
+        assert!(!policy.allows_empty_integrity(Ecosystem::Url));
+    }
+
+    #[test]
+    fn integrity_policy_custom_allowlist_respects_membership() {
+        let policy = IntegrityPolicy::RequiredWithEcosystemAllowlist(vec![Ecosystem::Npm]);
+        assert!(policy.allows_empty_integrity(Ecosystem::Npm));
+        assert!(!policy.allows_empty_integrity(Ecosystem::PyPi));
+        assert!(!policy.allows_empty_integrity(Ecosystem::Go));
     }
 
     #[test]

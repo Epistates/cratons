@@ -339,24 +339,31 @@ impl Dependency {
                     }
                 }
 
-                // Validate URL source
+                // Validate URL source.
+                //
+                // M-3: `http://` URL dependencies and URL deps with no
+                // `sha256` are hard-rejected. Cratons downloads and
+                // executes code from url deps; a network attacker on a
+                // plaintext link can swap the artifact, and missing
+                // integrity means the swap is undetectable. There is no
+                // legitimate 2026 use case that requires either.
                 if let Some(ref url) = d.url {
-                    if !url.starts_with("https://") && !url.starts_with("http://") {
+                    if !url.starts_with("https://") {
                         return Err(CratonsError::Manifest(format!(
-                            "Invalid URL for '{}': {}. Must start with https:// or http://",
+                            "URL dependency '{}' uses insecure scheme: {}. \
+                             Only https:// is permitted for URL dependencies.",
                             name, url
                         )));
                     }
 
-                    // URL sources should have a sha256 hash for security
+                    // URL sources MUST have a sha256 hash for integrity.
                     if d.sha256.is_none() {
-                        // This is a warning-level issue, not an error
-                        // Log it but don't fail validation
-                        tracing::warn!(
-                            "URL dependency '{}' has no sha256 hash specified. \
-                             This is insecure and should be fixed.",
+                        return Err(CratonsError::Manifest(format!(
+                            "URL dependency '{}' must specify sha256. \
+                             URL sources have no registry to attest integrity, \
+                             so an explicit sha256 is required.",
                             name
-                        );
+                        )));
                     }
                 }
 
@@ -562,5 +569,69 @@ mod tests {
 
         let items: Vec<_> = deps.iter().collect();
         assert_eq!(items.len(), 2);
+    }
+
+    // ---- M-3: URL dependency hard-failures -------------------------------
+
+    fn url_dep(url: &str, sha256: Option<&str>) -> Dependency {
+        Dependency::Detailed(DetailedDependency {
+            url: Some(url.to_string()),
+            sha256: sha256.map(str::to_string),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn url_dep_http_is_rejected() {
+        let dep = url_dep(
+            "http://example.com/pkg-1.0.0.tgz",
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        );
+        let err = dep
+            .validate(Ecosystem::Url, "my-dep")
+            .expect_err("http:// URL dependencies must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("insecure scheme") || msg.contains("https://"),
+            "expected insecure-scheme error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn url_dep_missing_sha256_is_rejected() {
+        let dep = url_dep("https://example.com/pkg-1.0.0.tgz", None);
+        let err = dep
+            .validate(Ecosystem::Url, "my-dep")
+            .expect_err("URL dependency without sha256 must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must specify sha256") || msg.contains("sha256"),
+            "expected sha256-required error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn url_dep_https_with_sha256_is_accepted() {
+        let dep = url_dep(
+            "https://example.com/pkg-1.0.0.tgz",
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        );
+        dep.validate(Ecosystem::Url, "my-dep")
+            .expect("https:// + sha256 must validate successfully");
+    }
+
+    #[test]
+    fn url_dep_other_schemes_are_rejected() {
+        for bad in [
+            "ftp://example.com/pkg.tgz",
+            "file:///local/pkg.tgz",
+            "git://example.com/repo",
+        ] {
+            let dep = url_dep(bad, Some("deadbeef"));
+            let err = dep
+                .validate(Ecosystem::Url, "my-dep")
+                .expect_err(&format!("{bad} must be rejected"));
+            assert!(err.to_string().contains("insecure scheme") || err.to_string().contains("https://"));
+        }
     }
 }

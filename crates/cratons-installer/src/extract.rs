@@ -27,6 +27,39 @@ const MAX_COMPRESSION_RATIO: u64 = 100;
 /// Maximum number of files to extract
 const MAX_FILE_COUNT: usize = 100_000;
 
+/// Per-extraction context holding the canonicalized destination directory.
+///
+/// Canonicalization is a syscall. Precomputing it once at the start of an
+/// extraction (rather than per-entry) avoids both the perf hit and a class of
+/// TOCTOU hazards where intermediate symlinks created by earlier entries could
+/// be resolved differently by a later entry's `canonicalize` call.
+///
+/// All entry-level path validation must go through `validate_path_ctx` /
+/// `validate_symlink_target_ctx` / `validate_hard_link_target_ctx` so that
+/// every containment check uses the same canonical root.
+#[allow(dead_code)] // wired into callers in Phase 2
+struct ExtractContext {
+    /// The canonicalized destination directory. Falls back to the uncanonicalized
+    /// path only if the destination does not yet exist on disk (it must though,
+    /// since `PackageExtractor::extract` creates it before building the context).
+    canonical_dest: PathBuf,
+}
+
+impl ExtractContext {
+    /// Build a new context by canonicalizing `dest`. `dest` must already exist.
+    #[allow(dead_code)] // wired into callers in Phase 2
+    fn new(dest: &Path) -> Result<Self> {
+        let canonical_dest = dest.canonicalize().map_err(|e| {
+            CratonsError::Config(format!(
+                "Failed to canonicalize extraction destination {}: {}",
+                dest.display(),
+                e
+            ))
+        })?;
+        Ok(Self { canonical_dest })
+    }
+}
+
 /// Extracts packages from various archive formats.
 pub struct PackageExtractor {
     /// Temporary directory for extraction staging
@@ -82,6 +115,11 @@ impl PackageExtractor {
     /// - No parent directory references (..)
     /// - No Windows-style absolute paths
     /// - Path stays within the destination directory
+    ///
+    /// Retained for the existing unit test suite only. Production extraction
+    /// code goes through [`Self::validate_path_ctx`] with a pre-built
+    /// [`ExtractContext`], which is both faster and strictly more secure.
+    #[allow(dead_code)]
     fn validate_path(path: &Path, dest: &Path) -> Result<PathBuf> {
         // Check for problematic components
         for component in path.components() {
@@ -211,6 +249,194 @@ impl PackageExtractor {
         Ok(())
     }
 
+    /// Validate a path for extraction using a pre-canonicalized destination.
+    ///
+    /// This is the canonical entry point for Phase 2+ callers. It reuses
+    /// `ctx.canonical_dest` instead of canonicalizing per entry, removing a
+    /// class of TOCTOU hazards where an earlier-extracted symlink could shift
+    /// the meaning of a later entry's `canonicalize` call, and avoids the
+    /// unsafe `starts_with(dest)` fallback on non-canonical `dest` values.
+    #[allow(dead_code)] // wired into callers in Phase 2
+    fn validate_path_ctx(ctx: &ExtractContext, path: &Path) -> Result<PathBuf> {
+        // Reject problematic components up front.
+        for component in path.components() {
+            match component {
+                Component::ParentDir => {
+                    return Err(CratonsError::Config(format!(
+                        "Path traversal attempt detected: path contains '..': {}",
+                        path.display()
+                    )));
+                }
+                Component::Prefix(_) => {
+                    return Err(CratonsError::Config(format!(
+                        "Absolute Windows path not allowed: {}",
+                        path.display()
+                    )));
+                }
+                Component::RootDir => {
+                    return Err(CratonsError::Config(format!(
+                        "Absolute path not allowed: {}",
+                        path.display()
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        let final_path = ctx.canonical_dest.join(path);
+
+        // Determine the path we canonicalize: if `final_path` exists, canonicalize
+        // it directly. Otherwise walk up until we find an existing ancestor,
+        // canonicalize that, and append the missing tail. This preserves the
+        // property that containment is always checked against a canonical root,
+        // even for not-yet-created paths.
+        let check_path = if final_path.exists() {
+            final_path.canonicalize().map_err(|e| {
+                CratonsError::Config(format!(
+                    "Failed to canonicalize extraction path {}: {}",
+                    final_path.display(),
+                    e
+                ))
+            })?
+        } else {
+            let mut ancestor = final_path.as_path();
+            let mut trailing: Vec<&std::ffi::OsStr> = Vec::new();
+            loop {
+                if ancestor.exists() {
+                    break;
+                }
+                match ancestor.file_name() {
+                    Some(name) => trailing.push(name),
+                    None => break,
+                }
+                match ancestor.parent() {
+                    Some(parent) => ancestor = parent,
+                    None => break,
+                }
+            }
+            let anchor = if ancestor.as_os_str().is_empty() {
+                ctx.canonical_dest.clone()
+            } else {
+                ancestor.canonicalize().map_err(|e| {
+                    CratonsError::Config(format!(
+                        "Failed to canonicalize ancestor {}: {}",
+                        ancestor.display(),
+                        e
+                    ))
+                })?
+            };
+            let mut result = anchor;
+            for name in trailing.iter().rev() {
+                result.push(name);
+            }
+            result
+        };
+
+        if !check_path.starts_with(&ctx.canonical_dest) {
+            return Err(CratonsError::Config(format!(
+                "Path escapes destination directory: {} (dest: {})",
+                path.display(),
+                ctx.canonical_dest.display()
+            )));
+        }
+
+        Ok(final_path)
+    }
+
+    /// Validate a symlink target using a pre-canonicalized destination.
+    ///
+    /// Re-uses the existing component-walk logic from `validate_symlink_target`
+    /// but keys the containment check off `ctx.canonical_dest` so that every
+    /// resolution happens against the same canonical root.
+    #[allow(dead_code)] // wired into callers in Phase 2
+    fn validate_symlink_target_ctx(
+        ctx: &ExtractContext,
+        target: &Path,
+        link_location: &Path,
+    ) -> Result<()> {
+        Self::validate_symlink_target(target, link_location, &ctx.canonical_dest)
+    }
+
+    /// Validate a hard-link target inside `ctx.canonical_dest`.
+    ///
+    /// Unlike symlinks, hard links materialize an additional directory entry
+    /// for an existing inode. They cannot escape containment at read time (the
+    /// inode is already inside the tree) but a malicious tarball can still try
+    /// to:
+    ///
+    /// 1. Name a target outside `canonical_dest` (e.g. `../../etc/shadow`).
+    /// 2. Name a target that is itself a symlink pointing outside.
+    /// 3. Reference an entry that has not been extracted yet.
+    ///
+    /// We defend against all three: reject `..`/absolute components, require
+    /// the resolved target to live under `canonical_dest`, and require it to
+    /// already exist on disk (POSIX ustar guarantees source-before-link order
+    /// for well-formed archives; any archive that violates this ordering is
+    /// either broken or malicious).
+    ///
+    /// Returns the absolute, canonical-rooted path that should be passed to
+    /// `std::fs::hard_link` as the existing source.
+    #[allow(dead_code)] // wired into callers in Phase 2
+    fn validate_hard_link_target_ctx(
+        ctx: &ExtractContext,
+        link_location: &Path,
+        target: &Path,
+    ) -> Result<PathBuf> {
+        if target.is_absolute() {
+            return Err(CratonsError::Config(format!(
+                "Absolute hard link target not allowed: {} -> {}",
+                link_location.display(),
+                target.display()
+            )));
+        }
+        for component in target.components() {
+            match component {
+                Component::ParentDir => {
+                    return Err(CratonsError::Config(format!(
+                        "Hard link target contains '..': {} -> {}",
+                        link_location.display(),
+                        target.display()
+                    )));
+                }
+                Component::RootDir | Component::Prefix(_) => {
+                    return Err(CratonsError::Config(format!(
+                        "Hard link target has absolute component: {} -> {}",
+                        link_location.display(),
+                        target.display()
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        let resolved = ctx.canonical_dest.join(target);
+        if !resolved.exists() {
+            return Err(CratonsError::Config(format!(
+                "Hard link target does not exist inside extraction directory: {} -> {}",
+                link_location.display(),
+                target.display()
+            )));
+        }
+
+        let canonical_resolved = resolved.canonicalize().map_err(|e| {
+            CratonsError::Config(format!(
+                "Failed to canonicalize hard link target {}: {}",
+                resolved.display(),
+                e
+            ))
+        })?;
+        if !canonical_resolved.starts_with(&ctx.canonical_dest) {
+            return Err(CratonsError::Config(format!(
+                "Hard link target escapes destination: {} -> {} (resolved: {})",
+                link_location.display(),
+                target.display(),
+                canonical_resolved.display()
+            )));
+        }
+
+        Ok(canonical_resolved)
+    }
+
     /// Strip dangerous permissions from a mode (SUID, SGID, sticky).
     #[cfg(unix)]
     fn sanitize_mode(mode: u32) -> u32 {
@@ -244,14 +470,19 @@ impl PackageExtractor {
         // Create extraction directory
         fs::create_dir_all(&extract_dir)?;
 
+        // Build the per-extraction context once. All path validation below
+        // goes through `ctx.canonical_dest`, preventing intermediate symlinks
+        // or non-canonical roots from bypassing containment checks.
+        let ctx = ExtractContext::new(&extract_dir)?;
+
         // Extract based on ecosystem/format
         let result = match ecosystem {
-            Ecosystem::Npm => self.extract_npm_tarball(archive_path, &extract_dir),
-            Ecosystem::PyPi => self.extract_pypi_package(archive_path, &extract_dir),
-            Ecosystem::Crates => self.extract_crate(archive_path, &extract_dir),
-            Ecosystem::Go => self.extract_go_module(archive_path, &extract_dir),
-            Ecosystem::Maven => self.extract_maven_jar(archive_path, &extract_dir),
-            Ecosystem::Url => self.extract_url_package(archive_path, &extract_dir),
+            Ecosystem::Npm => self.extract_npm_tarball(archive_path, &ctx),
+            Ecosystem::PyPi => self.extract_pypi_package(archive_path, &ctx),
+            Ecosystem::Crates => self.extract_crate(archive_path, &ctx),
+            Ecosystem::Go => self.extract_go_module(archive_path, &ctx),
+            Ecosystem::Maven => self.extract_maven_jar(archive_path, &ctx),
+            Ecosystem::Url => self.extract_url_package(archive_path, &ctx),
         };
 
         // Clean up on failure
@@ -267,7 +498,7 @@ impl PackageExtractor {
     /// Extract npm tarball (.tgz).
     ///
     /// npm tarballs contain a `package/` directory with the actual content.
-    fn extract_npm_tarball(&self, archive_path: &Path, dest: &Path) -> Result<()> {
+    fn extract_npm_tarball(&self, archive_path: &Path, ctx: &ExtractContext) -> Result<()> {
         let file = File::open(archive_path)?;
         let compressed_size = file.metadata()?.len();
         let gz = GzDecoder::new(BufReader::new(file));
@@ -288,8 +519,9 @@ impl PackageExtractor {
                 continue;
             }
 
-            // Validate the path is safe (no path traversal)
-            let dest_path = Self::validate_path(stripped, dest)?;
+            // Validate the path is safe (no path traversal), rooted at the
+            // pre-canonicalized destination.
+            let dest_path = Self::validate_path_ctx(ctx, stripped)?;
 
             // Check file count limit
             file_count += 1;
@@ -357,9 +589,9 @@ impl PackageExtractor {
             } else if entry_type.is_dir() {
                 fs::create_dir_all(&dest_path)?;
             } else if entry_type.is_symlink() {
-                // Validate symlink target
+                // Validate symlink target against the canonical dest.
                 if let Some(ref target) = link_name {
-                    Self::validate_symlink_target(target, &dest_path, dest)?;
+                    Self::validate_symlink_target_ctx(ctx, target, &dest_path)?;
 
                     #[cfg(unix)]
                     {
@@ -371,15 +603,19 @@ impl PackageExtractor {
                     }
                 }
             } else if entry_type.is_hard_link() {
-                // Hard links must also be validated
+                // Hard links: validate the target stays inside canonical_dest
+                // AND actually create the hardlink. The previous implementation
+                // silently dropped the entry, leaving packages half-extracted
+                // and giving a false sense of containment.
                 if let Some(ref target) = link_name {
-                    let target_path = dest.join(target);
-                    if !target_path.starts_with(dest) {
-                        return Err(CratonsError::Config(format!(
-                            "Hard link target escapes destination: {} -> {}",
-                            path.display(),
-                            target.display()
-                        )));
+                    let resolved =
+                        Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
+                    #[cfg(any(unix, windows))]
+                    {
+                        if dest_path.exists() {
+                            fs::remove_file(&dest_path)?;
+                        }
+                        fs::hard_link(&resolved, &dest_path)?;
                     }
                 }
             }
@@ -388,7 +624,7 @@ impl PackageExtractor {
 
         debug!(
             "Extracted npm tarball to {} ({} files, {} bytes)",
-            dest.display(),
+            ctx.canonical_dest.display(),
             file_count,
             total_size
         );
@@ -396,15 +632,15 @@ impl PackageExtractor {
     }
 
     /// Extract PyPI package (.whl or .tar.gz).
-    fn extract_pypi_package(&self, archive_path: &Path, dest: &Path) -> Result<()> {
+    fn extract_pypi_package(&self, archive_path: &Path, ctx: &ExtractContext) -> Result<()> {
         let path_str = archive_path.to_string_lossy();
 
         if path_str.ends_with(".whl") {
             // Wheels are ZIP files
-            self.extract_zip(archive_path, dest)
+            self.extract_zip(archive_path, ctx)
         } else if path_str.ends_with(".tar.gz") || path_str.ends_with(".tgz") {
             // Source distributions are tarballs
-            self.extract_tarball(archive_path, dest)
+            self.extract_tarball(archive_path, ctx)
         } else {
             Err(CratonsError::Config(format!(
                 "Unknown PyPI package format: {}",
@@ -414,7 +650,7 @@ impl PackageExtractor {
     }
 
     /// Extract Rust crate (.crate is a .tar.gz).
-    fn extract_crate(&self, archive_path: &Path, dest: &Path) -> Result<()> {
+    fn extract_crate(&self, archive_path: &Path, ctx: &ExtractContext) -> Result<()> {
         // .crate files are gzipped tarballs with a top-level directory
         // named `{name}-{version}/`
         let file = File::open(archive_path)?;
@@ -442,7 +678,7 @@ impl PackageExtractor {
             }
 
             // Validate the path is safe
-            let dest_path = Self::validate_path(&stripped, dest)?;
+            let dest_path = Self::validate_path_ctx(ctx, &stripped)?;
 
             // Check limits
             file_count += 1;
@@ -502,7 +738,7 @@ impl PackageExtractor {
                 fs::create_dir_all(&dest_path)?;
             } else if entry_type.is_symlink() {
                 if let Some(target) = link_name {
-                    Self::validate_symlink_target(&target, &dest_path, dest)?;
+                    Self::validate_symlink_target_ctx(ctx, &target, &dest_path)?;
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::symlink;
@@ -512,12 +748,25 @@ impl PackageExtractor {
                         symlink(&target, &dest_path)?;
                     }
                 }
+            } else if entry_type.is_hard_link() {
+                // Hard links: validated against canonical_dest and materialized.
+                if let Some(ref target) = link_name {
+                    let resolved =
+                        Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
+                    #[cfg(any(unix, windows))]
+                    {
+                        if dest_path.exists() {
+                            fs::remove_file(&dest_path)?;
+                        }
+                        fs::hard_link(&resolved, &dest_path)?;
+                    }
+                }
             }
         }
 
         debug!(
             "Extracted crate to {} ({} files, {} bytes)",
-            dest.display(),
+            ctx.canonical_dest.display(),
             file_count,
             total_size
         );
@@ -525,16 +774,16 @@ impl PackageExtractor {
     }
 
     /// Extract Go module (.zip).
-    fn extract_go_module(&self, archive_path: &Path, dest: &Path) -> Result<()> {
+    fn extract_go_module(&self, archive_path: &Path, ctx: &ExtractContext) -> Result<()> {
         // Go modules are ZIP files with module@version/ prefix
-        self.extract_zip_strip_prefix(archive_path, dest, 1)
+        self.extract_zip_strip_prefix(archive_path, ctx, 1)
     }
 
     /// Extract Maven JAR.
     ///
     /// JARs are ZIP files, but we typically don't need to extract them -
     /// they're used as-is. We copy and verify the file.
-    fn extract_maven_jar(&self, archive_path: &Path, dest: &Path) -> Result<()> {
+    fn extract_maven_jar(&self, archive_path: &Path, ctx: &ExtractContext) -> Result<()> {
         let filename = archive_path
             .file_name()
             .unwrap_or_default()
@@ -579,23 +828,23 @@ impl PackageExtractor {
         debug!("Maven JAR hash: {}", jar_hash);
 
         // Copy the validated JAR file
-        let dest_path = dest.join(&*filename);
+        let dest_path = ctx.canonical_dest.join(&*filename);
         fs::copy(archive_path, &dest_path)?;
 
         // Write hash file for later verification
-        let hash_path = dest.join(format!("{}.blake3", filename));
+        let hash_path = ctx.canonical_dest.join(format!("{}.blake3", filename));
         fs::write(&hash_path, jar_hash.value.as_bytes())?;
 
         debug!(
             "Copied and verified Maven JAR to {} (hash: {})",
-            dest.display(),
+            ctx.canonical_dest.display(),
             jar_hash.short()
         );
         Ok(())
     }
 
     /// Extract a gzipped tarball with security checks.
-    fn extract_tarball(&self, archive_path: &Path, dest: &Path) -> Result<()> {
+    fn extract_tarball(&self, archive_path: &Path, ctx: &ExtractContext) -> Result<()> {
         let file = File::open(archive_path)?;
         let compressed_size = file.metadata()?.len();
         let gz = GzDecoder::new(BufReader::new(file));
@@ -609,7 +858,7 @@ impl PackageExtractor {
             let path = entry.path()?;
 
             // Validate the path is safe
-            let dest_path = Self::validate_path(&path, dest)?;
+            let dest_path = Self::validate_path_ctx(ctx, &path)?;
 
             file_count += 1;
             if file_count > self.max_file_count {
@@ -668,7 +917,7 @@ impl PackageExtractor {
                 fs::create_dir_all(&dest_path)?;
             } else if entry_type.is_symlink() {
                 if let Some(target) = link_name {
-                    Self::validate_symlink_target(&target, &dest_path, dest)?;
+                    Self::validate_symlink_target_ctx(ctx, &target, &dest_path)?;
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::symlink;
@@ -678,12 +927,25 @@ impl PackageExtractor {
                         symlink(&target, &dest_path)?;
                     }
                 }
+            } else if entry_type.is_hard_link() {
+                // Hard links: validated against canonical_dest and materialized.
+                if let Some(ref target) = link_name {
+                    let resolved =
+                        Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
+                    #[cfg(any(unix, windows))]
+                    {
+                        if dest_path.exists() {
+                            fs::remove_file(&dest_path)?;
+                        }
+                        fs::hard_link(&resolved, &dest_path)?;
+                    }
+                }
             }
         }
 
         debug!(
             "Extracted tarball to {} ({} files, {} bytes)",
-            dest.display(),
+            ctx.canonical_dest.display(),
             file_count,
             total_size
         );
@@ -691,7 +953,7 @@ impl PackageExtractor {
     }
 
     /// Extract a ZIP file with security checks.
-    fn extract_zip(&self, archive_path: &Path, dest: &Path) -> Result<()> {
+    fn extract_zip(&self, archive_path: &Path, ctx: &ExtractContext) -> Result<()> {
         let file = File::open(archive_path)?;
         let compressed_size = file.metadata()?.len();
         let mut archive = zip::ZipArchive::new(BufReader::new(file))
@@ -715,8 +977,8 @@ impl PackageExtractor {
             // enclosed_name() already handles path traversal for ZIP
             let outpath = match file.enclosed_name() {
                 Some(path) => {
-                    // Additional validation
-                    Self::validate_path(&path, dest)?
+                    // Additional validation against canonical_dest.
+                    Self::validate_path_ctx(ctx, &path)?
                 }
                 None => {
                     warn!("Skipping potentially unsafe ZIP entry: {}", file.name());
@@ -772,7 +1034,7 @@ impl PackageExtractor {
 
         debug!(
             "Extracted ZIP to {} ({} files, {} bytes)",
-            dest.display(),
+            ctx.canonical_dest.display(),
             file_count,
             total_size
         );
@@ -783,7 +1045,7 @@ impl PackageExtractor {
     fn extract_zip_strip_prefix(
         &self,
         archive_path: &Path,
-        dest: &Path,
+        ctx: &ExtractContext,
         strip: usize,
     ) -> Result<()> {
         let file = File::open(archive_path)?;
@@ -826,7 +1088,7 @@ impl PackageExtractor {
             }
 
             // Validate the stripped path
-            let outpath = Self::validate_path(&stripped, dest)?;
+            let outpath = Self::validate_path_ctx(ctx, &stripped)?;
 
             let entry_size = file.size();
             if entry_size > self.max_file_size {
@@ -877,7 +1139,7 @@ impl PackageExtractor {
         debug!(
             "Extracted ZIP (stripped {}) to {} ({} files, {} bytes)",
             strip,
-            dest.display(),
+            ctx.canonical_dest.display(),
             file_count,
             total_size
         );
@@ -885,7 +1147,7 @@ impl PackageExtractor {
     }
 
     /// Extract a plain tar archive with security checks.
-    fn extract_plain_tar(&self, archive_path: &Path, dest: &Path) -> Result<()> {
+    fn extract_plain_tar(&self, archive_path: &Path, ctx: &ExtractContext) -> Result<()> {
         let file = File::open(archive_path)?;
         let file_size = file.metadata()?.len();
         let mut archive = Archive::new(BufReader::new(file));
@@ -897,7 +1159,7 @@ impl PackageExtractor {
             let entry = entry?;
             let path = entry.path()?;
 
-            let dest_path = Self::validate_path(&path, dest)?;
+            let dest_path = Self::validate_path_ctx(ctx, &path)?;
 
             file_count += 1;
             if file_count > self.max_file_count {
@@ -957,7 +1219,7 @@ impl PackageExtractor {
                 fs::create_dir_all(&dest_path)?;
             } else if entry_type.is_symlink() {
                 if let Some(target) = link_name {
-                    Self::validate_symlink_target(&target, &dest_path, dest)?;
+                    Self::validate_symlink_target_ctx(ctx, &target, &dest_path)?;
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::symlink;
@@ -967,12 +1229,25 @@ impl PackageExtractor {
                         symlink(&target, &dest_path)?;
                     }
                 }
+            } else if entry_type.is_hard_link() {
+                // Hard links: validated against canonical_dest and materialized.
+                if let Some(ref target) = link_name {
+                    let resolved =
+                        Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
+                    #[cfg(any(unix, windows))]
+                    {
+                        if dest_path.exists() {
+                            fs::remove_file(&dest_path)?;
+                        }
+                        fs::hard_link(&resolved, &dest_path)?;
+                    }
+                }
             }
         }
 
         debug!(
             "Extracted tar to {} ({} files, {} bytes)",
-            dest.display(),
+            ctx.canonical_dest.display(),
             file_count,
             total_size
         );
@@ -982,32 +1257,32 @@ impl PackageExtractor {
     /// Extract a URL-sourced package.
     ///
     /// Attempts to auto-detect the format based on file extension.
-    fn extract_url_package(&self, archive_path: &Path, dest: &Path) -> Result<()> {
+    fn extract_url_package(&self, archive_path: &Path, ctx: &ExtractContext) -> Result<()> {
         let path_str = archive_path.to_string_lossy().to_lowercase();
 
         if path_str.ends_with(".tar.gz") || path_str.ends_with(".tgz") {
-            self.extract_tarball(archive_path, dest)
+            self.extract_tarball(archive_path, ctx)
         } else if path_str.ends_with(".zip") {
-            self.extract_zip(archive_path, dest)
+            self.extract_zip(archive_path, ctx)
         } else if path_str.ends_with(".tar") {
-            self.extract_plain_tar(archive_path, dest)
+            self.extract_plain_tar(archive_path, ctx)
         } else if path_str.ends_with(".tar.xz") || path_str.ends_with(".txz") {
             // XZ compressed tarball - use same security checks
-            self.extract_xz_tarball(archive_path, dest)
+            self.extract_xz_tarball(archive_path, ctx)
         } else {
             // Unknown format - just copy the file (validated destination)
             let filename = archive_path
                 .file_name()
                 .ok_or_else(|| CratonsError::Config("Invalid archive path".to_string()))?;
-            let dest_path = Self::validate_path(Path::new(filename), dest)?;
+            let dest_path = Self::validate_path_ctx(ctx, Path::new(filename))?;
             fs::copy(archive_path, &dest_path)?;
-            debug!("Copied URL package to {}", dest.display());
+            debug!("Copied URL package to {}", ctx.canonical_dest.display());
             Ok(())
         }
     }
 
     /// Extract an XZ-compressed tarball with security checks.
-    fn extract_xz_tarball(&self, archive_path: &Path, dest: &Path) -> Result<()> {
+    fn extract_xz_tarball(&self, archive_path: &Path, ctx: &ExtractContext) -> Result<()> {
         use xz2::read::XzDecoder;
 
         let file = File::open(archive_path)?;
@@ -1022,7 +1297,7 @@ impl PackageExtractor {
             let entry = entry?;
             let path = entry.path()?;
 
-            let dest_path = Self::validate_path(&path, dest)?;
+            let dest_path = Self::validate_path_ctx(ctx, &path)?;
 
             file_count += 1;
             if file_count > self.max_file_count {
@@ -1081,7 +1356,7 @@ impl PackageExtractor {
                 fs::create_dir_all(&dest_path)?;
             } else if entry_type.is_symlink() {
                 if let Some(target) = link_name {
-                    Self::validate_symlink_target(&target, &dest_path, dest)?;
+                    Self::validate_symlink_target_ctx(ctx, &target, &dest_path)?;
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::symlink;
@@ -1091,12 +1366,24 @@ impl PackageExtractor {
                         symlink(&target, &dest_path)?;
                     }
                 }
+            } else if entry_type.is_hard_link() {
+                if let Some(ref target) = link_name {
+                    let resolved =
+                        Self::validate_hard_link_target_ctx(ctx, &dest_path, target)?;
+                    #[cfg(any(unix, windows))]
+                    {
+                        if dest_path.exists() {
+                            fs::remove_file(&dest_path)?;
+                        }
+                        fs::hard_link(&resolved, &dest_path)?;
+                    }
+                }
             }
         }
 
         debug!(
             "Extracted xz tarball to {} ({} files, {} bytes)",
-            dest.display(),
+            ctx.canonical_dest.display(),
             file_count,
             total_size
         );
@@ -1274,5 +1561,62 @@ mod tests {
         // Current directory should be fine
         let result = PackageExtractor::validate_path(Path::new("./foo/bar"), dest_path);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn extract_context_resolves_canonical_dest() {
+        // ExtractContext must canonicalize the destination once, so that any
+        // symlinks in the path (e.g. /var -> /private/var on macOS) are
+        // resolved for all subsequent containment checks.
+        let dest = TempDir::new().unwrap();
+        let ctx = ExtractContext::new(dest.path()).expect("canonicalize");
+        let expected = dest.path().canonicalize().unwrap();
+        assert_eq!(ctx.canonical_dest, expected);
+    }
+
+    #[test]
+    fn extract_context_new_rejects_missing_dest() {
+        // A non-existent destination cannot be canonicalized; we refuse to
+        // start extraction against an unknown root.
+        let missing = std::path::PathBuf::from("/definitely/does/not/exist/cratons-test");
+        assert!(ExtractContext::new(&missing).is_err());
+    }
+
+    #[test]
+    fn validate_path_ctx_rejects_parent_dir() {
+        let dest = TempDir::new().unwrap();
+        let ctx = ExtractContext::new(dest.path()).unwrap();
+        assert!(PackageExtractor::validate_path_ctx(&ctx, Path::new("../escape")).is_err());
+    }
+
+    #[test]
+    fn validate_path_ctx_accepts_deeply_nested_new_path() {
+        // Deeply nested not-yet-existing paths are allowed as long as their
+        // ancestor resolves within canonical_dest. This closes L-1: the
+        // previous implementation fell through to a non-canonical prefix
+        // check for paths whose parent did not yet exist.
+        let dest = TempDir::new().unwrap();
+        let ctx = ExtractContext::new(dest.path()).unwrap();
+        let result =
+            PackageExtractor::validate_path_ctx(&ctx, Path::new("a/b/c/d/e/f/new-file.txt"));
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_path_ctx_rejects_escape_via_symlinked_ancestor() {
+        // Plant a symlink inside dest that points outside. A later entry that
+        // tries to write through it must be rejected by the canonical
+        // containment check.
+        use std::os::unix::fs::symlink;
+        let outside = TempDir::new().unwrap();
+        let dest = TempDir::new().unwrap();
+        let link_path = dest.path().join("escape");
+        symlink(outside.path(), &link_path).unwrap();
+
+        let ctx = ExtractContext::new(dest.path()).unwrap();
+        let result =
+            PackageExtractor::validate_path_ctx(&ctx, Path::new("escape/new-file.txt"));
+        assert!(result.is_err());
     }
 }

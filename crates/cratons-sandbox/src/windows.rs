@@ -17,10 +17,26 @@
 //! | Network isolation | Not supported (requires Windows Firewall or AppContainer) |
 //! | Filesystem isolation | Not supported (use process working directory) |
 //!
+//! ## Unsafe Code Policy
+//!
+//! The crate root denies `unsafe_code`. This module re-enables it locally
+//! because the Job Object surface has no safe wrapper: every call is a raw
+//! Win32 FFI invocation. The FFI boundary is narrow and concentrated here,
+//! and every `unsafe` block carries a `// SAFETY:` comment enforced by
+//! `clippy::undocumented_unsafe_blocks`.
+//!
+//! APIs wrapped unsafely (all from the `windows` crate):
+//! - `CreateJobObjectW` — anonymous handle creation; ownership captured by `JobObject` RAII.
+//! - `SetInformationJobObject` — writes a `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` we fully own.
+//! - `QueryInformationJobObject` — reads into a `MaybeUninit` that is only `assume_init`'d on `Ok`.
+//! - `OpenProcess` / `AssignProcessToJobObject` / `CloseHandle` — handle ownership transferred or closed in the same scope.
+//!
 //! ## References
 //!
 //! - [JOBOBJECT_EXTENDED_LIMIT_INFORMATION](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information)
 //! - [JOBOBJECT_BASIC_LIMIT_INFORMATION](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_limit_information)
+
+#![allow(unsafe_code)]
 
 use std::io;
 use std::mem::{self, MaybeUninit};

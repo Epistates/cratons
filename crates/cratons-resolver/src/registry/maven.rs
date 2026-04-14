@@ -347,24 +347,24 @@ impl RegistryClient for MavenClient {
             BTreeMap::new()
         };
 
-        // Get JAR URL and check for SHA1 checksum
+        // Get JAR URL.
+        //
+        // F-2: the previous implementation fetched `{jar_url}.sha1` from
+        // the same host as the JAR, which is both a same-origin attestation
+        // (a compromised Maven Central can trivially substitute both files)
+        // AND uses a cryptographically broken hash. We now leave integrity
+        // empty at resolution time; the installer's Maven path runs PGP
+        // verification against `{jar_url}.asc` using keys fetched and
+        // cached via `cratons_security::keyring::KeyStore`.
+        //
+        // Until F-final flips the default `IntegrityPolicy` allowlist,
+        // Maven packages reach the installer with empty integrity and
+        // are accepted under the allowlist with an `integrity-degraded`
+        // warning. The installer's Ecosystem::Maven branch in
+        // `verify_download_integrity` runs PGP verification unconditionally
+        // regardless of the integrity string.
         let jar_url = self.jar_url(&group_id, &artifact_id, version, classifier.as_deref());
-        let sha1_url = format!("{}.sha1", jar_url);
-
-        // Try to fetch SHA1 checksum
-        let integrity = if let Ok(response) = self.client.get(&sha1_url).send().await {
-            if response.status().is_success() {
-                if let Ok(sha1) = response.text().await {
-                    format!("sha1-{}", sha1.trim())
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
+        let integrity = String::new();
 
         Ok(PackageMetadata {
             name: format!("{}:{}", group_id, artifact_id),

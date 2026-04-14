@@ -5,7 +5,7 @@
 //! Inspired by the Cratons effect in superconductivity - the expulsion of
 //! magnetic fields to create a perfect state of zero resistance.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use miette::Result;
 use owo_colors::OwoColorize;
 use tracing::{debug, info_span};
@@ -15,7 +15,32 @@ pub mod config;
 pub mod exit_code;
 mod observability;
 
+use cratons_installer::SandboxPolicy;
 use exit_code::ExitCode;
+
+/// CLI mirror of [`cratons_installer::SandboxPolicy`]. A separate type keeps
+/// the installer crate free of a clap dependency while still giving the CLI
+/// a first-class enum with help text.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum SandboxPolicyArg {
+    /// Abort the install if the host cannot provide the required isolation.
+    Required,
+    /// Warn and fall back to running scripts directly when the sandbox is
+    /// incomplete.
+    Preferred,
+    /// Never attempt to sandbox. Scripts always run directly on the host.
+    Disabled,
+}
+
+impl From<SandboxPolicyArg> for SandboxPolicy {
+    fn from(arg: SandboxPolicyArg) -> Self {
+        match arg {
+            SandboxPolicyArg::Required => Self::Required,
+            SandboxPolicyArg::Preferred => Self::Preferred,
+            SandboxPolicyArg::Disabled => Self::Disabled,
+        }
+    }
+}
 
 /// Cratons - A language-agnostic package manager with hermetic builds
 #[derive(Parser)]
@@ -83,6 +108,19 @@ enum Commands {
         /// Use frozen lockfile (fail if outdated)
         #[arg(long)]
         frozen: bool,
+
+        /// Policy for post-install script sandboxing.
+        ///
+        /// `required` (default): abort if the host cannot provide the
+        /// required isolation capabilities. Fail-closed.
+        ///
+        /// `preferred`: warn and fall back to running scripts directly on
+        /// the host when the sandbox is incomplete.
+        ///
+        /// `disabled`: never attempt to sandbox. Scripts always run
+        /// directly. Only use in trusted environments.
+        #[arg(long, value_enum, default_value_t = SandboxPolicyArg::Required)]
+        sandbox_policy: SandboxPolicyArg,
     },
 
     /// Update dependencies
@@ -312,9 +350,20 @@ fn main() {
             let _span = info_span!("cmd_remove", deps_count = deps.len()).entered();
             commands::remove(&deps)
         }
-        Commands::Install { force, frozen } => {
-            let _span = info_span!("cmd_install", force, frozen, offline = cli.offline).entered();
-            commands::install(force, frozen, cli.offline)
+        Commands::Install {
+            force,
+            frozen,
+            sandbox_policy,
+        } => {
+            let _span = info_span!(
+                "cmd_install",
+                force,
+                frozen,
+                offline = cli.offline,
+                sandbox_policy = ?sandbox_policy
+            )
+            .entered();
+            commands::install(force, frozen, cli.offline, sandbox_policy.into())
         }
         Commands::Update { packages } => {
             let _span = info_span!(

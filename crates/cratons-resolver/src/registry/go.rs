@@ -12,16 +12,23 @@ use async_trait::async_trait;
 use cratons_core::{CratonsError, Ecosystem, Result, validate_package_name, validate_version};
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use tracing::{debug, instrument};
+use std::sync::Arc;
+use tokio::sync::OnceCell;
+use tracing::{debug, instrument, warn};
 
+use super::gosum::{self, TrustedKey};
 use super::{PackageMetadata, RegistryClient};
 
 /// Go module proxy client.
 pub struct GoProxyClient {
     client: reqwest::Client,
     proxy_url: String,
-    #[allow(dead_code)] // Reserved for checksum verification
     sum_db_url: String,
+    /// Lazy-loaded trusted verifier for `sum.golang.org` signed notes.
+    /// Bootstrapped from the compiled-in default on first use and cached
+    /// on disk at `~/.cache/cratons/keys/sum.golang.org.pub`. See
+    /// `gosum::DEFAULT_SUM_GOLANG_VKEY` for the rationale.
+    trust_root: Arc<OnceCell<TrustedKey>>,
 }
 
 impl GoProxyClient {
@@ -31,6 +38,7 @@ impl GoProxyClient {
             client,
             proxy_url: "https://proxy.golang.org".to_string(),
             sum_db_url: "https://sum.golang.org".to_string(),
+            trust_root: Arc::new(OnceCell::new()),
         }
     }
 
@@ -40,7 +48,67 @@ impl GoProxyClient {
             client,
             proxy_url: proxy_url.trim_end_matches('/').to_string(),
             sum_db_url: "https://sum.golang.org".to_string(),
+            trust_root: Arc::new(OnceCell::new()),
         }
+    }
+
+    /// Return the cached trusted verifier for `sum.golang.org`, loading it
+    /// from disk on first call.
+    async fn trust_root(&self) -> Result<&TrustedKey> {
+        self.trust_root
+            .get_or_try_init(|| async { gosum::load_or_bootstrap_trust_root() })
+            .await
+    }
+
+    /// Fetch the sum.golang.org `/lookup/{module}@{version}` response,
+    /// verify its signature against the pinned trust root, and return the
+    /// `h1:` hash of the module zip (base64, without the `h1:` prefix).
+    ///
+    /// On signature verification failure against the cached key, **does
+    /// not** automatically refetch or pivot to a different key — that
+    /// would be an exploitable trust-on-failure path. The operator must
+    /// update the cache file if Go has rotated the verifier key.
+    async fn fetch_sum_h1(&self, name: &str, version: &str) -> Result<String> {
+        let escaped = Self::escape_module_path(name);
+        let url = format!("{}/lookup/{}@{}", self.sum_db_url, escaped, version);
+        debug!("Fetching sum.golang.org lookup: {}", url);
+
+        let response = self.client.get(&url).send().await.map_err(|e| {
+            CratonsError::Network(format!(
+                "Failed to fetch sum.golang.org lookup for {}@{}: {}",
+                name, version, e
+            ))
+        })?;
+        if !response.status().is_success() {
+            return Err(CratonsError::Registry {
+                registry: "sum.golang.org".to_string(),
+                message: format!(
+                    "HTTP {} for lookup {}@{}",
+                    response.status(),
+                    name,
+                    version
+                ),
+            });
+        }
+        let raw = response.text().await.map_err(|e| {
+            CratonsError::Network(format!(
+                "Failed to read sum.golang.org response: {}",
+                e
+            ))
+        })?;
+
+        let trust = self.trust_root().await?;
+        let verified_body = gosum::verify_note(&raw, trust).map_err(|e| {
+            warn!(
+                module = %name,
+                version = %version,
+                "sum.golang.org signed-note verification failed: {}",
+                e
+            );
+            e
+        })?;
+
+        gosum::parse_verified_lookup(&verified_body, name, version)
     }
 
     /// Escape a module path for URL usage.
@@ -421,14 +489,29 @@ impl RegistryClient for GoProxyClient {
         // Download URL: /{module}/@v/{version}.zip
         let zip_url = format!("{}/{}/@v/{}.zip", self.proxy_url, escaped, version);
 
-        // For checksum, we'd need to query sum.golang.org
-        // Format: go.sum line is: {module} {version} h1:{hash}
-        // For now, use the origin hash if available
-        let integrity = version_info
-            .origin
-            .as_ref()
-            .map(|o| format!("sha256-{}", o.hash))
-            .unwrap_or_default();
+        // F-1: Query sum.golang.org for a cross-origin, signature-verified
+        // `h1:` hash. The signed-note verification is done inside
+        // `fetch_sum_h1` against the pinned trust root. A failure here is
+        // fatal under `IntegrityPolicy::Required`; under the default
+        // (Go on the allowlist), the caller may still install with an
+        // `integrity-degraded` warning.
+        let integrity = match self.fetch_sum_h1(name, version).await {
+            Ok(h1) => format!("h1-{}", h1),
+            Err(e) => {
+                warn!(
+                    module = %name,
+                    version = %version,
+                    error = %e,
+                    "sum.golang.org lookup failed; falling back to empty integrity"
+                );
+                // Leave integrity empty so the installer's policy gate
+                // surfaces the degradation via the allowlist warning
+                // path (or errors under `Required`). We do NOT fall back
+                // to the proxy-reported origin.hash, which would be a
+                // same-host attestation and defeats the purpose of F-1.
+                String::new()
+            }
+        };
 
         Ok(PackageMetadata {
             name: name.to_string(),

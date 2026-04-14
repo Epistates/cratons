@@ -21,6 +21,7 @@
 //! This prevents supply chain attacks that try to phone home or download
 //! additional payloads.
 
+use crate::SandboxPolicy;
 use cratons_core::{CratonsError, Result};
 use std::fs;
 use std::path::Path;
@@ -119,20 +120,26 @@ impl PackageScripts {
 }
 
 /// Runs post-install scripts for packages.
+///
+/// The runner's behavior on sandbox availability is governed by the
+/// [`SandboxPolicy`] it was constructed with. See that enum's doc comment
+/// for the full semantics.
 pub struct PostInstallRunner {
-    /// Whether to isolate scripts in containers
-    isolate: bool,
+    sandbox_policy: SandboxPolicy,
 }
 
 impl PostInstallRunner {
-    /// Create a new script runner.
-    pub fn new(isolate: bool) -> Self {
-        Self { isolate }
+    /// Create a new script runner governed by the given sandbox policy.
+    pub fn new(sandbox_policy: SandboxPolicy) -> Self {
+        Self { sandbox_policy }
     }
 
     /// Run post-install scripts for an npm package.
     ///
-    /// Executes lifecycle scripts in order: preinstall → install → postinstall
+    /// Executes lifecycle scripts in order: preinstall → install → postinstall.
+    /// Each script is dispatched through [`run_isolated`](Self::run_isolated)
+    /// for policies other than [`SandboxPolicy::Disabled`]; the isolated path
+    /// itself handles the capability check and any policy-directed fallback.
     pub async fn run_scripts(&self, package_dir: &Path, project_dir: &Path) -> Result<()> {
         let scripts = PackageScripts::from_package_dir(package_dir);
 
@@ -144,10 +151,21 @@ impl PostInstallRunner {
         for (script_name, script) in scripts.lifecycle_scripts() {
             debug!("Running {} script for {}", script_name, scripts.name);
 
-            if self.isolate {
-                self.run_isolated(script, package_dir, project_dir).await?;
-            } else {
-                self.run_direct(script, package_dir)?;
+            match self.sandbox_policy {
+                SandboxPolicy::Disabled => {
+                    // Explicit opt-out from sandboxing. Log loudly so the
+                    // decision is audit-visible.
+                    warn!(
+                        package = %scripts.name,
+                        script = script_name,
+                        "sandbox_policy=Disabled; running script directly on host"
+                    );
+                    self.run_direct(script, package_dir)?;
+                }
+                SandboxPolicy::Required | SandboxPolicy::Preferred => {
+                    self.run_isolated(script, package_dir, project_dir, &scripts.name)
+                        .await?;
+                }
             }
         }
 
@@ -176,20 +194,65 @@ impl PostInstallRunner {
         Ok(())
     }
 
+    /// Compute the set of sandbox capabilities required by the given config,
+    /// compare against what the chosen backend actually provides, and return
+    /// the names of any missing capabilities.
+    ///
+    /// This is pure — it does not touch the filesystem or spawn a sandbox —
+    /// and is exposed at module scope only so tests can drive it directly.
+    fn missing_capabilities(
+        level: cratons_sandbox::IsolationLevel,
+        config: &cratons_sandbox::config::SandboxConfig,
+    ) -> Vec<&'static str> {
+        use cratons_sandbox::config::NetworkAccess;
+
+        let mut missing = Vec::new();
+        // `NetworkAccess::None` is our request for a hermetic network. Any
+        // backend that cannot enforce network isolation is a miss.
+        // `NetworkAccess` does not implement `PartialEq`; use `matches!`.
+        if matches!(config.network, NetworkAccess::None) && !level.has_network_isolation() {
+            missing.push("network_isolation");
+        }
+        // Scoped mounts mean the caller has opinions about which paths the
+        // sandbox may see. That requires real filesystem isolation.
+        let has_mounts = !config.rw_mounts.is_empty() || !config.ro_mounts.is_empty();
+        if has_mounts && !level.has_filesystem_isolation() {
+            missing.push("filesystem_isolation");
+        }
+        // Resource limits are meaningful only in backends that can enforce them.
+        let wants_limits = config.limits.memory.is_some()
+            || config.limits.timeout.is_some()
+            || config.limits.pids.is_some();
+        if wants_limits && !level.has_resource_limits() {
+            missing.push("resource_limits");
+        }
+        missing
+    }
+
     /// Run a script in an isolated sandbox.
     ///
     /// Uses platform-native sandboxing:
     /// - Linux: Full container isolation with namespaces
     /// - macOS: sandbox-exec with SBPL profile
     /// - Windows: Job Objects with restricted tokens
+    ///
+    /// If the chosen backend cannot provide every capability implied by the
+    /// `SandboxConfig` built below, dispatch is governed by
+    /// [`SandboxPolicy`]:
+    ///
+    /// - `Required` → return an error naming the missing capabilities.
+    /// - `Preferred` → emit a structured warning, fall through to `run_direct`.
+    ///
+    /// [`SandboxPolicy::Disabled`] never reaches this method (see
+    /// [`run_scripts`](Self::run_scripts)).
     async fn run_isolated(
         &self,
         script: &str,
         package_dir: &Path,
         project_dir: &Path,
+        package_name: &str,
     ) -> Result<()> {
         use cratons_sandbox::{
-            IsolationLevel,
             config::{Mount, NetworkAccess, ResourceLimits, SandboxConfig},
             create_sandbox,
         };
@@ -203,15 +266,6 @@ impl PostInstallRunner {
             package_dir = %package_dir.display(),
             "setting up sandboxed script execution"
         );
-
-        // Fall back to direct execution if no isolation available
-        if matches!(isolation, IsolationLevel::None | IsolationLevel::Process) {
-            warn!(
-                "No sandbox isolation available (level: {:?}), running script directly",
-                isolation
-            );
-            return self.run_direct(script, package_dir);
-        }
 
         // Configure the sandbox
         let config =
@@ -236,6 +290,40 @@ impl PostInstallRunner {
                     "npm_config_cache",
                     package_dir.join(".npm-cache").to_string_lossy().to_string(),
                 );
+
+        // Capability check against the derived requirements. This is the
+        // policy gate that replaces the old silent `matches!(None | Process)`
+        // fallback.
+        let missing = Self::missing_capabilities(isolation, &config);
+        if !missing.is_empty() {
+            match self.sandbox_policy {
+                SandboxPolicy::Required => {
+                    return Err(CratonsError::BuildFailed(format!(
+                        "sandbox_policy=Required; backend {:?} is missing required \
+                         capabilities {:?} for package '{}'. \
+                         Set sandbox_policy=Preferred (or --sandbox-policy preferred) \
+                         to warn-and-continue, or Disabled to skip sandboxing entirely.",
+                        isolation, missing, package_name
+                    )));
+                }
+                SandboxPolicy::Preferred => {
+                    warn!(
+                        package = %package_name,
+                        isolation_level = ?isolation,
+                        missing_capabilities = ?missing,
+                        "sandbox_policy=Preferred; backend lacks required capabilities, \
+                         falling back to direct execution on host"
+                    );
+                    return self.run_direct(script, package_dir);
+                }
+                SandboxPolicy::Disabled => {
+                    // Unreachable in practice: run_scripts dispatches
+                    // Disabled directly to run_direct and never calls
+                    // run_isolated. Keep a defensive branch anyway.
+                    return self.run_direct(script, package_dir);
+                }
+            }
+        }
 
         // Add node_modules/.bin to PATH if it exists
         let bin_path = project_dir.join("node_modules").join(".bin");
@@ -351,10 +439,19 @@ impl PostInstallRunner {
             for (script_name, script) in scripts.lifecycle_scripts() {
                 debug!("Running {} script for {}", script_name, scripts.name);
 
-                if self.isolate {
-                    self.run_isolated(script, package_dir, project_dir).await?;
-                } else {
-                    self.run_direct(script, package_dir)?;
+                match self.sandbox_policy {
+                    SandboxPolicy::Disabled => {
+                        warn!(
+                            package = %scripts.name,
+                            script = script_name,
+                            "sandbox_policy=Disabled; running script directly on host"
+                        );
+                        self.run_direct(script, package_dir)?;
+                    }
+                    SandboxPolicy::Required | SandboxPolicy::Preferred => {
+                        self.run_isolated(script, package_dir, project_dir, &scripts.name)
+                            .await?;
+                    }
                 }
             }
         }
@@ -487,5 +584,90 @@ mod tests {
 
         assert_eq!(scripts.preinstall, None); // Empty string filtered out
         assert_eq!(scripts.postinstall, Some("echo post".to_string()));
+    }
+
+    // ---- SandboxPolicy capability checks ----------------------------------
+
+    /// Build the same `SandboxConfig` that `run_isolated` constructs, so
+    /// that the capability check sees the same network/mount/limits shape.
+    fn post_install_config() -> cratons_sandbox::config::SandboxConfig {
+        use cratons_sandbox::config::{Mount, NetworkAccess, ResourceLimits, SandboxConfig};
+        use std::path::PathBuf;
+        SandboxConfig::new(vec!["sh".into(), "-c".into(), "true".into()])
+            .with_workdir(PathBuf::from("/tmp"))
+            .with_rw_mount(Mount::bind(PathBuf::from("/tmp"), false))
+            .with_ro_mount(Mount::bind(PathBuf::from("/tmp"), true))
+            .with_network(NetworkAccess::None)
+            .with_limits(ResourceLimits::for_post_install())
+    }
+
+    #[test]
+    fn missing_capabilities_none_for_full_container() {
+        let cfg = post_install_config();
+        let missing = PostInstallRunner::missing_capabilities(
+            cratons_sandbox::IsolationLevel::Container,
+            &cfg,
+        );
+        assert!(
+            missing.is_empty(),
+            "Container should satisfy all requirements, got {missing:?}"
+        );
+    }
+
+    #[test]
+    fn missing_capabilities_os_sandbox_satisfies_post_install() {
+        // OsSandbox is macOS sandbox-exec. After the Phase 3 fix it reports
+        // network isolation (SBPL `(deny network*)`) and satisfies the
+        // full capability set required by post-install scripts.
+        let cfg = post_install_config();
+        let missing = PostInstallRunner::missing_capabilities(
+            cratons_sandbox::IsolationLevel::OsSandbox,
+            &cfg,
+        );
+        assert!(
+            missing.is_empty(),
+            "OsSandbox should satisfy post-install requirements, got {missing:?}"
+        );
+    }
+
+    #[test]
+    fn missing_capabilities_process_isolation_misses_everything() {
+        let cfg = post_install_config();
+        let missing = PostInstallRunner::missing_capabilities(
+            cratons_sandbox::IsolationLevel::Process,
+            &cfg,
+        );
+        // Process isolation has none of network/filesystem/resource limits.
+        assert!(missing.contains(&"network_isolation"));
+        assert!(missing.contains(&"filesystem_isolation"));
+        assert!(missing.contains(&"resource_limits"));
+    }
+
+    #[test]
+    fn missing_capabilities_none_level_misses_everything() {
+        let cfg = post_install_config();
+        let missing = PostInstallRunner::missing_capabilities(
+            cratons_sandbox::IsolationLevel::None,
+            &cfg,
+        );
+        assert_eq!(missing.len(), 3);
+    }
+
+    #[test]
+    fn missing_capabilities_respects_config_opt_out() {
+        // If the caller didn't ask for network isolation (NetworkAccess::Full)
+        // the check should not flag network_isolation as missing even on
+        // Process level.
+        use cratons_sandbox::config::{NetworkAccess, SandboxConfig};
+        let cfg = SandboxConfig::new(vec!["sh".into(), "-c".into(), "true".into()])
+            .with_network(NetworkAccess::Full);
+        let missing = PostInstallRunner::missing_capabilities(
+            cratons_sandbox::IsolationLevel::Process,
+            &cfg,
+        );
+        assert!(
+            !missing.contains(&"network_isolation"),
+            "should not require network isolation when caller opted out"
+        );
     }
 }

@@ -294,14 +294,24 @@ pub fn remove(deps: &[String]) -> Result<()> {
 }
 
 /// Install dependencies.
-pub fn install(force: bool, frozen: bool, offline: bool) -> Result<()> {
+pub fn install(
+    force: bool,
+    frozen: bool,
+    offline: bool,
+    sandbox_policy: cratons_installer::SandboxPolicy,
+) -> Result<()> {
     // Use tokio runtime for async operations
     let rt = tokio::runtime::Runtime::new().into_diagnostic()?;
-    rt.block_on(install_async(force, frozen, offline))
+    rt.block_on(install_async(force, frozen, offline, sandbox_policy))
 }
 
 /// Async implementation of install.
-async fn install_async(force: bool, frozen: bool, offline: bool) -> Result<()> {
+async fn install_async(
+    force: bool,
+    frozen: bool,
+    offline: bool,
+    sandbox_policy: cratons_installer::SandboxPolicy,
+) -> Result<()> {
     let (manifest, manifest_path) =
         Manifest::find_and_load(".").map_err(|e| miette::miette!("{}", e))?;
 
@@ -378,15 +388,24 @@ async fn install_async(force: bool, frozen: bool, offline: bool) -> Result<()> {
     );
     pb.set_message("Installing packages...");
 
-    // Configure installer
+    // Configure installer. Sandbox policy comes from the CLI flag and
+    // controls what happens when the host cannot provide the requested
+    // isolation — by default, the install is aborted. See `SandboxPolicy`
+    // for the full semantics. Integrity policy defaults to
+    // `RequiredWithEcosystemAllowlist([Go, Maven])` until those ecosystems
+    // have independent integrity anchors. The default constructor loads
+    // the user-level Maven PGP keyring from
+    // `~/.config/cratons/trusted-keys/maven.toml` if present; F-2b does
+    // not yet wire project-level `[security.maven]` manifest config.
     let config = InstallerConfig {
         concurrency: 8,
         run_scripts: true,
-        strict_scripts: false,  // Don't fail on script errors by default
-        isolate_scripts: false, // Default to non-isolated for now
-        skip_integrity: false,
+        strict_scripts: false, // Don't fail on script errors by default
+        sandbox_policy,
+        integrity_policy: cratons_installer::IntegrityPolicy::default(),
         link_strategy: LinkStrategy::Symlink,
         ecosystems: None, // Install all ecosystems
+        ..InstallerConfig::default()
     };
 
     // Run installation
@@ -731,14 +750,18 @@ async fn exec_async(package: &str, args: &[String], offline: bool) -> Result<()>
     let store =
         Store::open_default().map_err(|e| miette::miette!("Failed to open store: {}", e))?;
 
+    // Transient exec installs use the default (fail-closed) sandbox policy
+    // and the default integrity policy. Operators can relax either via the
+    // main `install` command; `exec` is intentionally strict.
     let config = InstallerConfig {
         concurrency: 4,
         run_scripts: true,
         strict_scripts: false,
-        isolate_scripts: false,
-        skip_integrity: false,
+        sandbox_policy: cratons_installer::SandboxPolicy::default(),
+        integrity_policy: cratons_installer::IntegrityPolicy::default(),
         link_strategy: LinkStrategy::Symlink,
         ecosystems: None,
+        ..InstallerConfig::default()
     };
 
     let installer = cratons_installer::Installer::with_config(&store, config);

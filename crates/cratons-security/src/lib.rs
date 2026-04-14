@@ -21,7 +21,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod keyring;
 pub mod policy;
+
+pub use keyring::{
+    DEFAULT_KEYSERVERS, FirstInstallPolicy, KeyStore, MavenTrustConfig, TrustedKeyEntry,
+    normalize_fingerprint,
+};
 
 use cratons_core::{CratonsError, Ecosystem, Result};
 use cratons_lockfile::Lockfile;
