@@ -42,14 +42,31 @@ from the verified body is the cryptographic dirhash over the module
 zip's contents. At install time, `verify_download_integrity` recomputes
 the dirhash locally from the downloaded bytes and compares.
 
-**Deferred to F‑1b**: full transparency-log inclusion and consistency
-proofs against the Merkle tree tiles. Current design verifies that a
-signature exists, not that the signed value is part of an append-only
-log. A retroactively forked log would not be detected.
+**F‑1b status**: partially landed. The module
+`crates/cratons-resolver/src/registry/gosum/tlog.rs` implements RFC
+6962 primitives — record hashing, node hashing, inclusion proof
+verification, consistency proof verification, tile cache, and
+checkpoint persistence — verified against hand-constructed tree
+vectors in unit tests. The `GoProxyClient` now also fetches
+`/latest` on first use per install, pins a `(tree_size, tree_hash)`
+baseline at `~/.cache/cratons/keys/sum.golang.org.checkpoint`, and
+enforces **weak consistency** against the baseline on every
+subsequent run: size-monotonic (no log shrinking) and stable-root-
+at-same-size (no in-place rewrite).
 
-**Revisit F‑1b when**: the sum.golang.org tile format stabilizes in a
-reusable Rust crate and the gain in the attacker model is worth the
-~150 LOC plus hardcoded Ed25519 proof-key management.
+**Deferred to F‑1c**: full tile-fetching path. Weak consistency
+catches the most obvious attacker signals (rollback, in-place
+rewrite) but cannot detect a retroactive fork where the attacker
+continues to grow the forked tree. Full detection requires
+fetching `/tile/<H>/<L>/<N>` paths and running
+`tlog::verify_inclusion` + `tlog::verify_consistency` against real
+proof data. The primitives are ready; only the HTTP tile fetcher
+needs to be wired.
+
+**Revisit F‑1c when**: `cratons install` latency becomes a
+complaint, or when `sum.golang.org` rotates its verifier key (which
+would exercise the full proof path and surface any remaining wiring
+gaps).
 
 ---
 
@@ -83,23 +100,39 @@ installer:
    against a keyserver-fetched key. This proves "bytes are consistent
    with SOME key's signature" but not identity.
 
-**Deferred to F‑2c**:
+**F‑2c status**: landed.
 
-- Project-level `[security.maven]` section in `cratons.toml` and the
-  matching manifest struct in `cratons-manifest`.
-- Lockfile `[pgp-trust]` TOFU table — first install of a groupId
-  without an explicit entry records the signing key fingerprint; later
-  installs must match.
-- `first-install` policy with `deny`/`warn`/`allow` modes and
-  `CRATONS_CI=1` environment variable opting into `deny`.
+- Project-level `[security.maven]` section in `cratons.toml` parses into
+  `cratons_manifest::SecurityConfig`. `InstallerConfig::from_manifest`
+  overlays this onto the default user-level config; precedence is
+  project > user > TOFU.
+- Lockfile `[pgp-trust]` TOFU table serializes as a `BTreeMap<String,
+  String>` (deterministic ordering, omitted when empty).
+- `first-install` policy is wired in `download.rs::verify_maven_pgp`
+  with `deny`/`warn`/`allow` and `CRATONS_CI=1` promoting `warn` →
+  `deny` for non-interactive automation.
+- TOFU pins flow up through
+  `InstallResult::pgp_trust_updates`; the CLI (`cratons install`)
+  merges them into the lockfile on disk after a successful install.
+  Failed installs never corrupt the on-disk lockfile.
+- The F‑2b "permissive fallback" that soft-passed unverified
+  signatures is gone. Every Maven package now goes through the strict
+  trust ladder: project/user config → lockfile TOFU → first-install
+  policy → error (under `Deny`).
+
+**Deferred to F‑2d**:
+
 - Sigstore `.sigstore.json` verification for Maven Central publishers
-  who've adopted it (2026 update). `sigstore` is already a workspace dep
-  (used by toolchain verification).
-
-**Revisit F‑2c when**: we've shipped F‑final to production and operators
-start asking for lockfile-driven trust pinning (which is the natural
-escape hatch when the default strict posture is too painful for
-rapidly-evolving Maven dependency trees).
+  who've adopted it (2026 update). `sigstore` is already a workspace
+  dep (used by toolchain verification). A future phase could prefer
+  Sigstore when the `.sigstore.json` sidecar exists and fall back to
+  PGP otherwise.
+- Keyserver rotation detection. Cached PGP keys are re-validated
+  against their own self-signature on every use, but there's no TTL
+  or revocation-check path. A compromised key that gets revoked on
+  `keys.openpgp.org` would continue to verify locally until the
+  operator manually clears
+  `~/.cache/cratons/keys/pgp/<fingerprint>.asc`.
 
 ---
 

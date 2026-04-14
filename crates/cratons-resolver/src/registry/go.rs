@@ -29,6 +29,12 @@ pub struct GoProxyClient {
     /// on disk at `~/.cache/cratons/keys/sum.golang.org.pub`. See
     /// `gosum::DEFAULT_SUM_GOLANG_VKEY` for the rationale.
     trust_root: Arc<OnceCell<TrustedKey>>,
+    /// F-1b weak-consistency baseline. Fetched from `/latest` on first
+    /// use, pinned to `~/.cache/cratons/keys/sum.golang.org.checkpoint`,
+    /// and validated against subsequent `/latest` responses to detect
+    /// size regressions and same-size root rewrites. Full RFC 6962
+    /// consistency proofs are tracked as F-1c.
+    latest_checkpoint: Arc<OnceCell<gosum::tlog::Checkpoint>>,
 }
 
 impl GoProxyClient {
@@ -39,6 +45,7 @@ impl GoProxyClient {
             proxy_url: "https://proxy.golang.org".to_string(),
             sum_db_url: "https://sum.golang.org".to_string(),
             trust_root: Arc::new(OnceCell::new()),
+            latest_checkpoint: Arc::new(OnceCell::new()),
         }
     }
 
@@ -49,6 +56,7 @@ impl GoProxyClient {
             proxy_url: proxy_url.trim_end_matches('/').to_string(),
             sum_db_url: "https://sum.golang.org".to_string(),
             trust_root: Arc::new(OnceCell::new()),
+            latest_checkpoint: Arc::new(OnceCell::new()),
         }
     }
 
@@ -57,6 +65,58 @@ impl GoProxyClient {
     async fn trust_root(&self) -> Result<&TrustedKey> {
         self.trust_root
             .get_or_try_init(|| async { gosum::load_or_bootstrap_trust_root() })
+            .await
+    }
+
+    /// F-1b: fetch and verify the current sum.golang.org transparency
+    /// log checkpoint via `/latest`, enforce weak consistency against
+    /// any previously-pinned baseline, and update the pinned baseline
+    /// if the tree has grown. Caches the result per-client so the
+    /// network fetch happens at most once per install run.
+    async fn current_checkpoint(&self) -> Result<&gosum::tlog::Checkpoint> {
+        self.latest_checkpoint
+            .get_or_try_init(|| async {
+                let url = format!("{}/latest", self.sum_db_url);
+                debug!("Fetching sum.golang.org /latest: {}", url);
+                let response = self.client.get(&url).send().await.map_err(|e| {
+                    CratonsError::Network(format!(
+                        "Failed to fetch sum.golang.org /latest: {}",
+                        e
+                    ))
+                })?;
+                if !response.status().is_success() {
+                    return Err(CratonsError::Registry {
+                        registry: "sum.golang.org".to_string(),
+                        message: format!("HTTP {} for /latest", response.status()),
+                    });
+                }
+                let raw = response.text().await.map_err(|e| {
+                    CratonsError::Network(format!(
+                        "Failed to read sum.golang.org /latest body: {}",
+                        e
+                    ))
+                })?;
+                let trust = self.trust_root().await?;
+                let verified_body = gosum::verify_note(&raw, trust)?;
+                let current = gosum::parse_verified_latest(&verified_body)?;
+
+                // Weak consistency enforcement against any pinned baseline.
+                match gosum::tlog::Checkpoint::load()? {
+                    Some(baseline) => {
+                        gosum::enforce_weak_consistency(&baseline, &current)?;
+                        // Persist the new baseline only if strictly newer.
+                        // Equal-size checkpoints are no-ops (already pinned).
+                        if current.tree_size > baseline.tree_size {
+                            current.save()?;
+                        }
+                    }
+                    None => {
+                        // First install on this machine — pin-on-first-use.
+                        current.save()?;
+                    }
+                }
+                Ok(current)
+            })
             .await
     }
 
@@ -69,6 +129,12 @@ impl GoProxyClient {
     /// would be an exploitable trust-on-failure path. The operator must
     /// update the cache file if Go has rotated the verifier key.
     async fn fetch_sum_h1(&self, name: &str, version: &str) -> Result<String> {
+        // F-1b: enforce weak consistency against the pinned baseline
+        // before trusting any `/lookup` hash. The first call per
+        // client populates the OnceCell; subsequent calls are a
+        // cheap deref.
+        let _checkpoint = self.current_checkpoint().await?;
+
         let escaped = Self::escape_module_path(name);
         let url = format!("{}/lookup/{}@{}", self.sum_db_url, escaped, version);
         debug!("Fetching sum.golang.org lookup: {}", url);

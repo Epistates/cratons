@@ -33,6 +33,8 @@
 //! that a signature exists, not that the signed value is part of an
 //! append-only log; a retroactively forked log would not be detected.
 
+pub mod tlog;
+
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use cratons_core::{CratonsError, Result};
@@ -310,6 +312,105 @@ pub fn verify_note(note: &str, trust: &TrustedKey) -> Result<String> {
     }
 }
 
+/// Parse a verified `/latest` response body and return the pinned
+/// transparency-log checkpoint it describes.
+///
+/// The `/latest` body (inside the signed-note wrapper, which the caller
+/// must have already verified via [`verify_note`]) is:
+///
+/// ```text
+/// go.sum database tree
+/// <tree_size>
+/// <base64 tree_hash>
+/// ```
+///
+/// where `tree_size` is a non-negative integer and `tree_hash` is a
+/// base64-encoded 32-byte SHA-256 root hash.
+///
+/// On malformed input returns a descriptive `CratonsError::Config`.
+pub fn parse_verified_latest(body: &str) -> Result<tlog::Checkpoint> {
+    let mut lines = body.lines();
+    let header = lines.next().unwrap_or("");
+    if header.trim() != "go.sum database tree" {
+        return Err(CratonsError::Config(format!(
+            "sum.golang.org /latest body has unexpected header: {:?}",
+            header
+        )));
+    }
+    let size_line = lines.next().ok_or_else(|| {
+        CratonsError::Config("sum.golang.org /latest body missing tree_size line".to_string())
+    })?;
+    let hash_line = lines.next().ok_or_else(|| {
+        CratonsError::Config("sum.golang.org /latest body missing tree_hash line".to_string())
+    })?;
+    let tree_size: u64 = size_line.trim().parse().map_err(|e| {
+        CratonsError::Config(format!(
+            "sum.golang.org /latest body: invalid tree_size: {}",
+            e
+        ))
+    })?;
+    let decoded = B64.decode(hash_line.trim()).map_err(|e| {
+        CratonsError::Config(format!(
+            "sum.golang.org /latest body: invalid base64 tree_hash: {}",
+            e
+        ))
+    })?;
+    if decoded.len() != tlog::HASH_SIZE {
+        return Err(CratonsError::Config(format!(
+            "sum.golang.org /latest body: tree_hash must be {} bytes, got {}",
+            tlog::HASH_SIZE,
+            decoded.len()
+        )));
+    }
+    let mut tree_hash = [0u8; tlog::HASH_SIZE];
+    tree_hash.copy_from_slice(&decoded);
+    Ok(tlog::Checkpoint {
+        tree_size,
+        tree_hash,
+    })
+}
+
+/// Enforce a weak consistency invariant between a pinned baseline
+/// checkpoint and a freshly-fetched one from `/latest`.
+///
+/// Full RFC 6962 consistency proofs require tile fetches to walk the
+/// node boundary between the two trees and are tracked as F-1c. This
+/// weak check catches the most common attacker signals without any
+/// additional network I/O:
+///
+/// - **Size monotonicity**: the new tree must be at least as large as
+///   the pinned baseline. A size regression is a hard error (indicates
+///   tree rewrite / rollback).
+/// - **Equal-size root stability**: if the new tree is exactly the
+///   same size as the pinned baseline, its root must be bytewise
+///   identical. A root change at the same size means the tree was
+///   rewritten in place.
+///
+/// Does NOT catch: a retroactive fork where the attacker continues to
+/// grow the forked tree. That requires a full consistency proof.
+pub fn enforce_weak_consistency(
+    baseline: &tlog::Checkpoint,
+    current: &tlog::Checkpoint,
+) -> Result<()> {
+    if current.tree_size < baseline.tree_size {
+        return Err(CratonsError::Config(format!(
+            "sum.golang.org weak consistency: pinned tree_size {} > current {}. \
+             The checksum log has shrunk — this is a strong signal of attacker rewrite. \
+             See docs/security-followups.md#f-1b for the recovery procedure.",
+            baseline.tree_size, current.tree_size
+        )));
+    }
+    if current.tree_size == baseline.tree_size && current.tree_hash != baseline.tree_hash {
+        return Err(CratonsError::Config(
+            "sum.golang.org weak consistency: equal tree sizes but different root hashes. \
+             The log was rewritten in place — this is a strong signal of attacker rewrite. \
+             See docs/security-followups.md#f-1b for the recovery procedure."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Parse a verified `/lookup/<module>@<version>` body and return the
 /// `h1:` hash of the module zip (as base64, without the `h1:` prefix).
 ///
@@ -446,6 +547,79 @@ mod tests {
         let key = TrustedKey::parse_vkey(DEFAULT_SUM_GOLANG_VKEY)
             .expect("default sum.golang.org vkey must parse");
         assert_eq!(key.name, "sum.golang.org");
+    }
+
+    #[test]
+    fn parse_verified_latest_extracts_checkpoint() {
+        let body = format!(
+            "go.sum database tree\n42\n{}\n",
+            B64.encode([0x5au8; tlog::HASH_SIZE])
+        );
+        let cp = parse_verified_latest(&body).expect("parse");
+        assert_eq!(cp.tree_size, 42);
+        assert_eq!(cp.tree_hash, [0x5au8; tlog::HASH_SIZE]);
+    }
+
+    #[test]
+    fn parse_verified_latest_rejects_bad_header() {
+        let body = format!(
+            "not the right header\n42\n{}\n",
+            B64.encode([0u8; tlog::HASH_SIZE])
+        );
+        assert!(parse_verified_latest(&body).is_err());
+    }
+
+    #[test]
+    fn enforce_weak_consistency_allows_growth() {
+        let baseline = tlog::Checkpoint {
+            tree_size: 100,
+            tree_hash: [0x11u8; tlog::HASH_SIZE],
+        };
+        // New tree is larger; we accept (full proof would be needed
+        // for strict consistency but weak check permits monotonic
+        // growth).
+        let current = tlog::Checkpoint {
+            tree_size: 200,
+            tree_hash: [0x22u8; tlog::HASH_SIZE],
+        };
+        enforce_weak_consistency(&baseline, &current).unwrap();
+    }
+
+    #[test]
+    fn enforce_weak_consistency_rejects_shrink() {
+        let baseline = tlog::Checkpoint {
+            tree_size: 200,
+            tree_hash: [0x11u8; tlog::HASH_SIZE],
+        };
+        let current = tlog::Checkpoint {
+            tree_size: 150,
+            tree_hash: [0x22u8; tlog::HASH_SIZE],
+        };
+        let err = enforce_weak_consistency(&baseline, &current).unwrap_err();
+        assert!(err.to_string().contains("shrunk"));
+    }
+
+    #[test]
+    fn enforce_weak_consistency_rejects_same_size_different_root() {
+        let baseline = tlog::Checkpoint {
+            tree_size: 100,
+            tree_hash: [0x11u8; tlog::HASH_SIZE],
+        };
+        let current = tlog::Checkpoint {
+            tree_size: 100,
+            tree_hash: [0x22u8; tlog::HASH_SIZE],
+        };
+        let err = enforce_weak_consistency(&baseline, &current).unwrap_err();
+        assert!(err.to_string().contains("rewritten"));
+    }
+
+    #[test]
+    fn enforce_weak_consistency_allows_identical() {
+        let cp = tlog::Checkpoint {
+            tree_size: 100,
+            tree_hash: [0x11u8; tlog::HASH_SIZE],
+        };
+        enforce_weak_consistency(&cp, &cp).unwrap();
     }
 
     #[test]
