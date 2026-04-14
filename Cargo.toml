@@ -46,13 +46,13 @@ cratons-credentials = { path = "crates/cratons-credentials", version = "0.1.0" }
 cratons-test-fixtures = { path = "crates/cratons-test-fixtures", version = "0.1.0" }
 
 # youki crates (container runtime) - using published crates.io versions for supply chain security
-libcontainer = "0.5"
-libcgroups = "0.5"
-liboci-cli = "0.5"
-libseccomp = "0.3"
+libcontainer = "0.6"
+libcgroups = "0.6"
+liboci-cli = "0.6"
+libseccomp = "0.4"
 
 # OCI specification
-oci-spec = "0.8"
+oci-spec = "0.9"
 
 # Async runtime
 tokio = { version = "1.50", features = ["full"] }
@@ -134,7 +134,7 @@ miette = { version = "7.4", features = ["fancy"] }
 # Logging / Tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-indicatif = "0.17"
+indicatif = "0.18"
 console = "0.15"
 owo-colors = "4.1"
 
@@ -207,6 +207,23 @@ use_self = "allow"
 needless_pass_by_value = "allow"
 ref_option = "allow"
 missing_const_for_fn = "allow"
+self_only_used_in_recursion = "allow"
+unnecessary_unwrap = "allow"
+to_string_in_format_args = "allow"
+print_literal = "allow"
+needless_collect = "allow"
+len_zero = "allow"
+io_other_error = "allow"
+iter_on_single_items = "allow"
+single_char_pattern = "allow"
+unnecessary_get_then_check = "allow"
+iter_over_hash_type = "allow"
+iter_kv_map = "allow"
+float_cmp = "allow"
+assertions_on_constants = "allow"
+bool_assert_comparison = "allow"
+assertion_on_constant_boolean = "allow"
+expect_fun_call = "allow"
 unused_self = "allow"
 collapsible_if = "allow"
 large_enum_variant = "allow"

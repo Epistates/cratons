@@ -28,13 +28,13 @@ libc = "0.2"
 
 # nix for safe Unix bindings - resource tracking on all Unix, full features on Linux
 [target.'cfg(target_os = "macos")'.dependencies.nix]
-version = "0.30"
+version = "0.31"
 features = ["resource"]
 
 # Linux-specific (youki/OCI integration)
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.30", features = ["process", "signal", "user", "mount", "sched", "fs", "resource"] }
-oci-spec = "0.8"
+nix = { version = "0.31", features = ["process", "signal", "user", "mount", "sched", "fs", "resource"] }
+oci-spec = { workspace = true }
 caps = "0.5"
 libcontainer = { workspace = true }
 libcgroups = { workspace = true }
@@ -42,7 +42,7 @@ libseccomp = { workspace = true }
 
 # Windows-specific
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_JobObjects",
     "Win32_System_Threading",

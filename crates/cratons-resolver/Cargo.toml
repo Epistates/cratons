@@ -21,7 +21,7 @@ tokio = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
-pubgrub = "0.3"
+pubgrub = "0.4"
 pep440_rs = "0.7"
 semver = { workspace = true }
 petgraph = { workspace = true }
@@ -31,6 +31,13 @@ urlencoding = { workspace = true }
 pep508_rs = { workspace = true }
 node-semver = { workspace = true }
 governor = "0.10"
+
+# F-1: Go sum.golang.org signed-note verification + h1: dirhash
+sha2 = { workspace = true }
+base64 = { workspace = true }
+ed25519-dalek = "2.1"
+zip = "8.2"
+dirs = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

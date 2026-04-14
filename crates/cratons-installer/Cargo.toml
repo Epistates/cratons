@@ -17,6 +17,9 @@ cratons-resolver = { workspace = true }
 cratons-builder = { workspace = true }
 cratons-environment = { workspace = true }
 cratons-sandbox = { workspace = true }
+cratons-security = { workspace = true }
+pgp = { workspace = true }
+hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

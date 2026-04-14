@@ -262,7 +262,7 @@ impl DependencyProvider for SatDependencyProvider {
         package: &SatPackage,
         version: &SatVersion,
     ) -> std::result::Result<Dependencies<SatPackage, Ranges<SatVersion>, String>, Self::Err> {
-        let mut deps = DependencyConstraints::<SatPackage, Ranges<SatVersion>>::default();
+        let mut entries: Vec<(SatPackage, Ranges<SatVersion>)> = Vec::new();
 
         // Root dependencies
         if package == &self.root_package {
@@ -272,9 +272,11 @@ impl DependencyProvider for SatDependencyProvider {
                     ecosystem: *ecosystem,
                 };
                 let range = parse_range(*ecosystem, req);
-                deps.insert(dep_pkg, range);
+                entries.push((dep_pkg, range));
             }
-            return Ok(Dependencies::Available(deps));
+            return Ok(Dependencies::Available(
+                DependencyConstraints::from_iter(entries),
+            ));
         }
 
         // Fetch metadata
@@ -301,7 +303,7 @@ impl DependencyProvider for SatDependencyProvider {
                 ecosystem: package.ecosystem,
             };
             let range = parse_range(package.ecosystem, req);
-            deps.insert(dep_pkg, range);
+            entries.push((dep_pkg, range));
         }
 
         // M-16: Add required peer dependencies as hard constraints (npm v7+ semantics)
@@ -321,12 +323,14 @@ impl DependencyProvider for SatDependencyProvider {
                     ecosystem: package.ecosystem,
                 };
                 let range = parse_range(package.ecosystem, req);
-                deps.insert(dep_pkg, range);
+                entries.push((dep_pkg, range));
             }
             // Optional peer deps are NOT added as constraints
         }
 
-        Ok(Dependencies::Available(deps))
+        Ok(Dependencies::Available(
+            DependencyConstraints::from_iter(entries),
+        ))
     }
 }
 

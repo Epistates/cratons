@@ -8,9 +8,9 @@ use cratons_benchmarks::{
     generate_medium_manifest, generate_small_manifest,
 };
 use cratons_core::{Ecosystem, Version, VersionReq};
-use cratons_manifest::Manifest;
 use cratons_resolver::graph::{DependencyGraph, DependencyKind};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 
 /// Benchmark dependency graph construction.
 fn bench_graph_construction(c: &mut Criterion) {

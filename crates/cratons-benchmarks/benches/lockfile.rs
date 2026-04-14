@@ -10,8 +10,9 @@
 use cratons_benchmarks::{generate_lockfile, generate_lockfile_toml};
 use cratons_core::{ContentHash, Ecosystem};
 use cratons_lockfile::{ArtifactCache, DependencyRef, LockedPackage, Lockfile};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::fs;
+use std::hint::black_box;
 use tempfile::NamedTempFile;
 
 /// Benchmark parsing a small lockfile.
