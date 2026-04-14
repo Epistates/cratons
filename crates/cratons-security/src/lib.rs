@@ -103,14 +103,14 @@ impl Severity {
         }
 
         // Parse vector components
-        let mut av_score = 0.0; // Attack Vector
-        let mut ac_score = 0.0; // Attack Complexity
-        let mut pr_score = 0.0; // Privileges Required
-        let mut ui_score = 0.0; // User Interaction
-        let mut scope_changed = false;
-        let mut c_score = 0.0; // Confidentiality Impact
-        let mut i_score = 0.0; // Integrity Impact
-        let mut a_score = 0.0; // Availability Impact
+        let mut av_score = None; // Attack Vector
+        let mut ac_score = None; // Attack Complexity
+        let mut pr_metric = None; // Privileges Required
+        let mut ui_score = None; // User Interaction
+        let mut scope_changed = None;
+        let mut c_score = None; // Confidentiality Impact
+        let mut i_score = None; // Integrity Impact
+        let mut a_score = None; // Availability Impact
 
         for part in vector.split('/') {
             let (metric, value) = match part.split_once(':') {
@@ -121,68 +121,73 @@ impl Severity {
             match metric {
                 "AV" => {
                     av_score = match value {
-                        "N" => 0.85, // Network
-                        "A" => 0.62, // Adjacent
-                        "L" => 0.55, // Local
-                        "P" => 0.2,  // Physical
-                        _ => 0.0,
+                        "N" => Some(0.85), // Network
+                        "A" => Some(0.62), // Adjacent
+                        "L" => Some(0.55), // Local
+                        "P" => Some(0.2),  // Physical
+                        _ => None,
                     };
                 }
                 "AC" => {
                     ac_score = match value {
-                        "L" => 0.77, // Low
-                        "H" => 0.44, // High
-                        _ => 0.0,
+                        "L" => Some(0.77), // Low
+                        "H" => Some(0.44), // High
+                        _ => None,
                     };
                 }
                 "PR" => {
-                    pr_score = match (value, scope_changed) {
-                        ("N", _) => 0.85,     // None
-                        ("L", false) => 0.62, // Low, unchanged scope
-                        ("L", true) => 0.68,  // Low, changed scope
-                        ("H", false) => 0.27, // High, unchanged scope
-                        ("H", true) => 0.50,  // High, changed scope
-                        _ => 0.0,
-                    };
+                    pr_metric = Some(value);
                 }
                 "UI" => {
                     ui_score = match value {
-                        "N" => 0.85, // None
-                        "R" => 0.62, // Required
-                        _ => 0.0,
+                        "N" => Some(0.85), // None
+                        "R" => Some(0.62), // Required
+                        _ => None,
                     };
                 }
                 "S" => {
-                    scope_changed = value == "C";
-                    // Recalculate PR if scope changes
+                    scope_changed = match value {
+                        "U" => Some(false),
+                        "C" => Some(true),
+                        _ => None,
+                    };
                 }
                 "C" => {
                     c_score = match value {
-                        "H" => 0.56, // High
-                        "L" => 0.22, // Low
-                        "N" => 0.0,  // None
-                        _ => 0.0,
+                        "H" => Some(0.56), // High
+                        "L" => Some(0.22), // Low
+                        "N" => Some(0.0),  // None
+                        _ => None,
                     };
                 }
                 "I" => {
                     i_score = match value {
-                        "H" => 0.56, // High
-                        "L" => 0.22, // Low
-                        "N" => 0.0,  // None
-                        _ => 0.0,
+                        "H" => Some(0.56), // High
+                        "L" => Some(0.22), // Low
+                        "N" => Some(0.0),  // None
+                        _ => None,
                     };
                 }
                 "A" => {
                     a_score = match value {
-                        "H" => 0.56, // High
-                        "L" => 0.22, // Low
-                        "N" => 0.0,  // None
-                        _ => 0.0,
+                        "H" => Some(0.56), // High
+                        "L" => Some(0.22), // Low
+                        "N" => Some(0.0),  // None
+                        _ => None,
                     };
                 }
                 _ => {}
             }
         }
+
+        let scope_changed = scope_changed?;
+        let pr_score = parse_cvss_pr_score(pr_metric?, scope_changed)?;
+        let av_score = av_score?;
+        let ac_score = ac_score?;
+        let ui_score = ui_score?;
+        let c_score = c_score?;
+        let i_score = i_score?;
+        let a_score = a_score?;
 
         // Calculate Impact Sub Score (ISS)
         let iss: f64 = 1.0 - ((1.0 - c_score) * (1.0 - i_score) * (1.0 - a_score));
@@ -207,6 +212,17 @@ impl Severity {
         };
 
         Some(Self::from_cvss_score(base_score))
+    }
+}
+
+fn parse_cvss_pr_score(value: &str, scope_changed: bool) -> Option<f64> {
+    match (value, scope_changed) {
+        ("N", _) => Some(0.85),     // None
+        ("L", false) => Some(0.62), // Low, unchanged scope
+        ("L", true) => Some(0.68),  // Low, changed scope
+        ("H", false) => Some(0.27), // High, unchanged scope
+        ("H", true) => Some(0.50),  // High, changed scope
+        _ => None,
     }
 }
 
@@ -1194,6 +1210,27 @@ mod tests {
         assert_eq!(Severity::from_cvss_score(8.0), Severity::High);
         assert_eq!(Severity::from_cvss_score(5.0), Severity::Medium);
         assert_eq!(Severity::from_cvss_score(2.0), Severity::Low);
+    }
+
+    #[test]
+    fn test_severity_from_cvss_vector_scope_changed_pr_is_order_independent() {
+        let scope_after_pr = "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:C/C:L/I:L/A:N";
+        let scope_before_pr = "CVSS:3.1/AV:L/AC:L/S:C/PR:H/UI:N/C:L/I:L/A:N";
+
+        assert_eq!(
+            Severity::from_cvss_vector(scope_after_pr),
+            Some(Severity::Medium)
+        );
+        assert_eq!(
+            Severity::from_cvss_vector(scope_before_pr),
+            Some(Severity::Medium)
+        );
+    }
+
+    #[test]
+    fn test_severity_from_cvss_vector_rejects_missing_scope() {
+        let invalid = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/C:H/I:H/A:H";
+        assert_eq!(Severity::from_cvss_vector(invalid), None);
     }
 
     #[test]

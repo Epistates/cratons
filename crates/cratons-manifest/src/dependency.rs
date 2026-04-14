@@ -92,6 +92,12 @@ impl Dependencies {
         for (name, dep) in &self.maven {
             dep.validate(Ecosystem::Maven, name)?;
         }
+        for (name, dep) in &self.url {
+            dep.validate(Ecosystem::Url, name)?;
+        }
+        for (name, dep) in &self.workspace {
+            dep.validate(name)?;
+        }
         Ok(())
     }
 
@@ -502,6 +508,51 @@ impl WorkspaceDep {
             Self::Detailed { path, .. } => path,
         }
     }
+
+    /// Validate a workspace dependency reference.
+    pub fn validate(&self, name: &str) -> Result<()> {
+        if name.is_empty() {
+            return Err(CratonsError::Manifest(
+                "Workspace dependency name cannot be empty".to_string(),
+            ));
+        }
+
+        let path = self.path();
+        if path.trim().is_empty() {
+            return Err(CratonsError::Manifest(format!(
+                "Workspace dependency '{}' must specify a relative path",
+                name
+            )));
+        }
+        if path.contains('\0') {
+            return Err(CratonsError::Manifest(format!(
+                "Workspace dependency '{}' contains a null byte in its path",
+                name
+            )));
+        }
+        if path.starts_with('/') || path.starts_with('\\') || has_windows_drive_prefix(path) {
+            return Err(CratonsError::Manifest(format!(
+                "Workspace dependency '{}' must use a relative path, got {}",
+                name, path
+            )));
+        }
+
+        for segment in path.split(['/', '\\']) {
+            if segment == ".." {
+                return Err(CratonsError::Manifest(format!(
+                    "Workspace dependency '{}' path contains '..': {}",
+                    name, path
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn has_windows_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
 }
 
 #[cfg(test)]
@@ -631,7 +682,37 @@ mod tests {
             let err = dep
                 .validate(Ecosystem::Url, "my-dep")
                 .expect_err(&format!("{bad} must be rejected"));
-            assert!(err.to_string().contains("insecure scheme") || err.to_string().contains("https://"));
+            assert!(
+                err.to_string().contains("insecure scheme") || err.to_string().contains("https://")
+            );
         }
+    }
+
+    #[test]
+    fn workspace_dep_parent_path_is_rejected() {
+        let dep = WorkspaceDep::Path("../core".to_string());
+        let err = dep
+            .validate("core")
+            .expect_err("workspace paths escaping the manifest root must be rejected");
+        assert!(err.to_string().contains("contains '..'"));
+    }
+
+    #[test]
+    fn workspace_dep_windows_absolute_path_is_rejected() {
+        let dep = WorkspaceDep::Path(r"C:\workspace\core".to_string());
+        let err = dep
+            .validate("core")
+            .expect_err("absolute Windows paths must be rejected on every host");
+        assert!(err.to_string().contains("relative path"));
+    }
+
+    #[test]
+    fn workspace_dep_relative_path_is_accepted() {
+        let dep = WorkspaceDep::Detailed {
+            path: "./packages/core".to_string(),
+            features: vec!["derive".to_string()],
+        };
+        dep.validate("core")
+            .expect("safe relative workspace paths must validate");
     }
 }

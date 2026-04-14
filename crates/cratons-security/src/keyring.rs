@@ -47,10 +47,8 @@ use tracing::{debug, warn};
 /// Default hardcoded keyserver URLs. The list is compiled into the
 /// cratons binary; operators can override it via
 /// [`MavenTrustConfig::keyservers`].
-pub const DEFAULT_KEYSERVERS: &[&str] = &[
-    "https://keys.openpgp.org",
-    "https://keyserver.ubuntu.com",
-];
+pub const DEFAULT_KEYSERVERS: &[&str] =
+    &["https://keys.openpgp.org", "https://keyserver.ubuntu.com"];
 
 /// Trust policy when a group ID has no explicit keyring entry and no TOFU
 /// pin has been recorded yet.
@@ -219,28 +217,26 @@ impl KeyStore {
             debug!(url = %url, "HKP lookup");
             match self.client.get(&url).send().await {
                 Ok(resp) if resp.status().is_success() => match resp.text().await {
-                    Ok(armor) => {
-                        match self.validate_armor_matches(&armor, &fp_norm) {
-                            Ok(()) => {
-                                self.write_cache_atomic(&cache_path, &armor)?;
-                                debug!(
-                                    fingerprint = %fp_norm,
-                                    keyserver = %keyserver,
-                                    "cached PGP key from keyserver"
-                                );
-                                return Ok(armor);
-                            }
-                            Err(e) => {
-                                warn!(
-                                    keyserver = %keyserver,
-                                    fingerprint = %fp_norm,
-                                    error = %e,
-                                    "keyserver returned a key whose fingerprint did not match"
-                                );
-                                last_error = Some(e);
-                            }
+                    Ok(armor) => match self.validate_armor_matches(&armor, &fp_norm) {
+                        Ok(()) => {
+                            self.write_cache_atomic(&cache_path, &armor)?;
+                            debug!(
+                                fingerprint = %fp_norm,
+                                keyserver = %keyserver,
+                                "cached PGP key from keyserver"
+                            );
+                            return Ok(armor);
                         }
-                    }
+                        Err(e) => {
+                            warn!(
+                                keyserver = %keyserver,
+                                fingerprint = %fp_norm,
+                                error = %e,
+                                "keyserver returned a key whose fingerprint did not match"
+                            );
+                            last_error = Some(e);
+                        }
+                    },
                     Err(e) => {
                         last_error = Some(CratonsError::Network(format!(
                             "Failed to read keyserver response from {}: {}",
@@ -275,9 +271,8 @@ impl KeyStore {
     /// requested one. `expected_fp` must already be normalized (upper,
     /// spaceless).
     fn validate_armor_matches(&self, armor: &str, expected_fp: &str) -> Result<()> {
-        let (parsed, _headers) = SignedPublicKey::from_string(armor).map_err(|e| {
-            CratonsError::Config(format!("Failed to parse armored PGP key: {}", e))
-        })?;
+        let (parsed, _headers) = SignedPublicKey::from_string(armor)
+            .map_err(|e| CratonsError::Config(format!("Failed to parse armored PGP key: {}", e)))?;
         let fp_obj = parsed.fingerprint();
         let actual_fp = hex_upper(fp_obj.as_bytes());
         if actual_fp != expected_fp {
@@ -295,12 +290,10 @@ impl KeyStore {
             .suffix(".tmp")
             .tempfile_in(&self.cache_dir)
             .map_err(|e| CratonsError::Config(format!("Failed to open temp file: {}", e)))?;
-        std::fs::write(tmp.path(), contents).map_err(|e| {
-            CratonsError::Config(format!("Failed to write cache tmp: {}", e))
-        })?;
-        tmp.persist(path).map_err(|e| {
-            CratonsError::Config(format!("Failed to rename cache tmp: {}", e))
-        })?;
+        std::fs::write(tmp.path(), contents)
+            .map_err(|e| CratonsError::Config(format!("Failed to write cache tmp: {}", e)))?;
+        tmp.persist(path)
+            .map_err(|e| CratonsError::Config(format!("Failed to rename cache tmp: {}", e)))?;
         Ok(())
     }
 
@@ -309,9 +302,8 @@ impl KeyStore {
     pub(crate) fn inject_cached(&self, fingerprint: &str, armor: &str) -> Result<()> {
         let fp_norm = normalize_fingerprint(fingerprint)?;
         let path = self.cache_dir.join(format!("{}.asc", fp_norm));
-        std::fs::write(&path, armor).map_err(|e| {
-            CratonsError::Config(format!("inject_cached write failed: {}", e))
-        })?;
+        std::fs::write(&path, armor)
+            .map_err(|e| CratonsError::Config(format!("inject_cached write failed: {}", e)))?;
         Ok(())
     }
 

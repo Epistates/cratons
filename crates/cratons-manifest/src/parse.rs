@@ -232,9 +232,21 @@ impl Manifest {
             ));
         }
 
-        // Validate dependencies
+        // Validate every dependency table eagerly so invalid or insecure specs
+        // cannot hide in rarely-used sections.
         self.dependencies.validate()?;
         self.dev_dependencies.validate()?;
+        self.optional_dependencies.validate()?;
+        self.overrides.validate()?;
+        self.build.dependencies.validate()?;
+
+        if let Some(workspace) = &self.workspace {
+            workspace.dependencies.validate()?;
+        }
+
+        for target in self.target.values() {
+            target.dependencies.validate()?;
+        }
 
         Ok(())
     }
@@ -519,6 +531,15 @@ pub struct TargetConfig {
 mod tests {
     use super::*;
 
+    fn assert_manifest_rejected(content: &str, expected_fragment: &str) {
+        let err = Manifest::from_str(content).expect_err("manifest must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains(expected_fragment),
+            "expected error containing '{expected_fragment}', got: {message}"
+        );
+    }
+
     #[test]
     fn test_parse_minimal_manifest() {
         let content = r#"
@@ -554,7 +575,10 @@ group-id = "com.google.guava"
 fingerprint = "1122334455667788990011223344556677889900"
 "#;
         let manifest = Manifest::from_str(content).unwrap();
-        assert_eq!(manifest.security.maven.first_install.as_deref(), Some("deny"));
+        assert_eq!(
+            manifest.security.maven.first_install.as_deref(),
+            Some("deny")
+        );
         assert_eq!(
             manifest.security.maven.keyservers,
             vec!["https://internal.example/"]
@@ -699,5 +723,109 @@ axios = "^1.0.0"
         assert!(required.npm.contains_key("axios"));
         // express is optional, should not be in required
         assert!(!required.npm.contains_key("express"));
+    }
+
+    #[test]
+    fn test_manifest_rejects_insecure_url_dependency() {
+        assert_manifest_rejected(
+            r#"
+[package]
+name = "my-app"
+version = "1.0.0"
+
+[dependencies.url]
+asset = { url = "http://example.com/pkg.tgz", sha256 = "deadbeef" }
+"#,
+            "https://",
+        );
+    }
+
+    #[test]
+    fn test_manifest_rejects_insecure_optional_url_dependency() {
+        assert_manifest_rejected(
+            r#"
+[package]
+name = "my-app"
+version = "1.0.0"
+
+[optional-dependencies.url]
+asset = { url = "http://example.com/pkg.tgz", sha256 = "deadbeef" }
+"#,
+            "https://",
+        );
+    }
+
+    #[test]
+    fn test_manifest_rejects_insecure_override_url_dependency() {
+        assert_manifest_rejected(
+            r#"
+[package]
+name = "my-app"
+version = "1.0.0"
+
+[overrides.url]
+asset = { url = "http://example.com/pkg.tgz", sha256 = "deadbeef" }
+"#,
+            "https://",
+        );
+    }
+
+    #[test]
+    fn test_manifest_rejects_insecure_workspace_shared_url_dependency() {
+        assert_manifest_rejected(
+            r#"
+[workspace]
+members = ["packages/*"]
+
+[workspace.dependencies.url]
+asset = { url = "https://example.com/pkg.tgz" }
+"#,
+            "sha256",
+        );
+    }
+
+    #[test]
+    fn test_manifest_rejects_invalid_workspace_dependency_path() {
+        assert_manifest_rejected(
+            r#"
+[package]
+name = "my-app"
+version = "1.0.0"
+
+[dependencies.workspace]
+core = "../core"
+"#,
+            "contains '..'",
+        );
+    }
+
+    #[test]
+    fn test_manifest_rejects_invalid_build_url_dependency() {
+        assert_manifest_rejected(
+            r#"
+[package]
+name = "my-app"
+version = "1.0.0"
+
+[build.dependencies.url]
+asset = { url = "https://example.com/pkg.tgz" }
+"#,
+            "sha256",
+        );
+    }
+
+    #[test]
+    fn test_manifest_rejects_invalid_target_url_dependency() {
+        assert_manifest_rejected(
+            r#"
+[package]
+name = "my-app"
+version = "1.0.0"
+
+[target.linux.dependencies.url]
+asset = { url = "https://example.com/pkg.tgz" }
+"#,
+            "sha256",
+        );
     }
 }
