@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security (phase 2 hardening: follow-ups F-1..F-6)
+
+- **Go modules**: integrity verification now uses `sum.golang.org` with
+  full Ed25519 signed-note verification of every `/lookup` response
+  against a pinned trust root (cached at
+  `~/.cache/cratons/keys/sum.golang.org.pub`). The resolver computes the
+  `h1:` dirhash of the downloaded module zip and cross-checks it against
+  the signed hash from the checksum database, producing a real
+  cross-origin integrity guarantee (F-1).
+- **Maven Central**: replaced the same-origin broken-SHA-1 attestation
+  with PGP detached-signature verification of every JAR against keys
+  fetched on first use from hardcoded trusted keyservers
+  (`keys.openpgp.org` primary, `keyserver.ubuntu.com` fallback) and
+  cached on disk. Returned keys are validated against the requested
+  fingerprint to prevent keyserver substitution attacks. Project-level
+  `[security.maven]` manifest config and lockfile TOFU pinning are
+  tracked as follow-up F-2c (F-2a/F-2b).
+- **Breaking**: `IntegrityPolicy::default()` is now `Required` — any
+  package with an empty registry integrity string aborts the install,
+  regardless of ecosystem. The previous default allowlisted Go and Maven
+  as degraded-by-default because neither had a credible cross-origin
+  integrity source. Both now do (F-1 and F-2), so the allowlist is
+  unnecessary. Operators relying on the old behavior can set
+  `IntegrityPolicy::RequiredWithEcosystemAllowlist(vec![...])` or
+  `Skip` explicitly (F-final).
+- **Benchmarks hygiene**: all `criterion::black_box` call sites migrated
+  to `std::hint::black_box` (F-6).
+
+### Deferred security follow-ups
+
+- **F-1b** (sum.golang.org transparency-log inclusion/consistency proofs
+  against Merkle tree tiles). Current design verifies signed-note
+  signatures but not log-append-only invariants. Rationale in
+  `docs/security-followups.md`.
+- **F-2c** (Maven manifest `[security.maven]` config + lockfile TOFU).
+  F-2b ships the library + install-time verification path; TOFU is a
+  separate phase.
+- **F-3, F-4, F-5**: dropped. Rationale in `docs/security-followups.md`.
+
 ## [0.1.0] - 2026-03-23
 
 ### Added

@@ -45,11 +45,30 @@ yanked = "deny"
 # Security advisory exceptions
 # Add entries here ONLY with security team approval and a remediation plan
 ignore = [
-    # protobuf vulnerability in libcontainer transitive dependency
-    # Impact: Limited - protobuf is only used for CRIU checkpoint/restore (optional feature)
-    # Mitigation: Input validation at cratons layer, feature rarely used
-    # Tracking: Waiting for libcontainer > 0.5.7 release with updated protobuf
-    { id = "RUSTSEC-2024-0437", reason = "Transitive dep from libcontainer; low impact for cratons use case" },
+    # protobuf vulnerability pulled in via rust-criu (libcontainer 0.6.0 transitive)
+    # Impact: Limited - protobuf 3.2.0 is only used for CRIU checkpoint/restore; cratons
+    # does not deserialize untrusted protobuf messages on this path.
+    # Mitigation: CRIU feature not exercised by cratons; no untrusted protobuf input.
+    # Tracking: Waiting for rust-criu > 0.4.0 with updated protobuf (>=3.7.2).
+    { id = "RUSTSEC-2024-0437", reason = "Transitive via rust-criu/libcontainer; CRIU path unused by cratons" },
+
+    # rsa Marvin timing sidechannel — no upstream fix available
+    # Impact: Theoretical key-recovery via timing on RSA decryption. Reached only via
+    # sigstore / pgp / openidconnect, which cratons uses for VERIFICATION of detached
+    # signatures on packages, not for private-key decryption. The Marvin attack requires
+    # attacker-observed decryption timing against a held private key — we hold none.
+    # Mitigation: cratons never performs RSA decryption with a private key; only verifies.
+    # Tracking: Waiting for RustCrypto/RSA constant-time fix (rsa >= 0.10 or replacement).
+    { id = "RUSTSEC-2023-0071", reason = "Verification-only path; no private-key decryption in cratons" },
+
+    # rand 0.8 unsoundness with custom tracing logger calling rand::rng()
+    # Impact: Only triggers if a custom tracing subscriber invokes rand::rng() re-entrantly
+    # during log emission. cratons observability uses tracing-subscriber fmt/json layers
+    # and OpenTelemetry OTLP layers — none of these sample randomness during log emission.
+    # Mitigation: No cratons code and no configured layer calls rand::rng() in a logger.
+    # Full reachability analysis: docs/security-followups.md#f-4
+    # Tracking: ecosystem-blocked on argon2/aes-gcm/rsa upgrading to rand_core 0.9.
+    { id = "RUSTSEC-2026-0097", reason = "Not reachable; see docs/security-followups.md#f-4" },
 ]
 
 # Git sources for advisory databases
