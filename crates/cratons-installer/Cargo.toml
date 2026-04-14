@@ -13,6 +13,7 @@ categories.workspace = true
 cratons-core = { workspace = true }
 cratons-store = { workspace = true }
 cratons-lockfile = { workspace = true }
+cratons-manifest = { workspace = true }
 cratons-resolver = { workspace = true }
 cratons-builder = { workspace = true }
 cratons-environment = { workspace = true }

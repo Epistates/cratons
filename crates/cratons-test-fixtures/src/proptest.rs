@@ -390,6 +390,7 @@ pub fn manifest_strategy() -> impl Strategy<Value = Manifest> {
                 resolution: HashMap::new(),
                 workspace: None,
                 target: HashMap::new(),
+                security: Default::default(),
                 manifest_path: None,
             },
         )

@@ -5,21 +5,50 @@ use cratons_core::{CratonsError, Ecosystem, Result};
 use cratons_lockfile::LockedPackage;
 use cratons_store::Store;
 use futures::stream::{self, StreamExt};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
+/// Per-download result carrying the stored artifact path, byte count,
+/// and any PGP trust-on-first-use pin that should be recorded into the
+/// lockfile after the install completes.
+///
+/// The pin is `None` for:
+/// - non-Maven packages,
+/// - Maven packages with an explicit project/user keyring entry
+///   (strict-verified, no new pin needed),
+/// - Maven packages that matched an existing lockfile TOFU pin (no
+///   change needed).
+///
+/// It is `Some((group_id, fingerprint))` for the first successful
+/// install of a groupId under `FirstInstallPolicy::{Warn, Allow}`.
+#[derive(Debug, Clone)]
+pub struct DownloadResult {
+    /// Final on-disk path of the stored artifact (in the CAS).
+    pub path: PathBuf,
+    /// Number of bytes downloaded over the network.
+    pub bytes_downloaded: u64,
+    /// Optional TOFU pin: `(group_id, fingerprint)`.
+    pub tofu_pin: Option<(String, String)>,
+}
+
 /// Downloads packages from registries with parallel fetch support.
 pub struct PackageDownloader {
     client: reqwest::Client,
     concurrency: usize,
-    /// Maven PGP trust configuration (F-2). Loaded from user config at
-    /// installer construction time. See `cratons_security::MavenTrustConfig`.
+    /// Maven PGP trust configuration (F-2). Loaded from user/project
+    /// config at installer construction time. See
+    /// `cratons_security::MavenTrustConfig`.
     maven_trust: Arc<cratons_security::MavenTrustConfig>,
     /// Shared PGP key cache. Created lazily on first Maven install so
     /// non-Maven workspaces don't pay the keystore open cost.
     maven_keystore: Arc<tokio::sync::OnceCell<cratons_security::KeyStore>>,
+    /// Snapshot of the lockfile's `[pgp-trust]` table at the start of
+    /// the install (F-2c). Read-only; new pins flow back up via
+    /// `DownloadResult.tofu_pin`.
+    pgp_trust_snapshot: Arc<BTreeMap<String, String>>,
 }
 
 impl PackageDownloader {
@@ -48,6 +77,26 @@ impl PackageDownloader {
             concurrency,
             maven_trust,
             maven_keystore: Arc::new(tokio::sync::OnceCell::new()),
+            pgp_trust_snapshot: Arc::new(BTreeMap::new()),
+        }
+    }
+
+    /// Construct a per-install downloader handle with a fresh PGP
+    /// trust snapshot cloned from the lockfile. Called by
+    /// `Installer::install` at the start of every install. The returned
+    /// handle shares the Arc'd HTTP client, maven_trust, and maven
+    /// keystore with the parent downloader but carries its own
+    /// `pgp_trust_snapshot`.
+    pub(crate) fn with_lockfile_trust(
+        &self,
+        snapshot: Arc<BTreeMap<String, String>>,
+    ) -> Self {
+        Self {
+            client: self.client.clone(),
+            concurrency: self.concurrency,
+            maven_trust: Arc::clone(&self.maven_trust),
+            maven_keystore: Arc::clone(&self.maven_keystore),
+            pgp_trust_snapshot: snapshot,
         }
     }
 
@@ -60,22 +109,20 @@ impl PackageDownloader {
             .await
     }
 
-    /// Is this Maven package's trust configuration strict? A package is
-    /// strict if its groupId matches any `[security.maven].trusted-keys`
-    /// entry — in that case, verification failure aborts. If the groupId
-    /// has no entry, we treat it as allowlisted (the default policy) and
-    /// let the integrity policy layer decide.
-    fn maven_trust_is_strict(&self, pkg: &LockedPackage) -> bool {
-        let Some(group_id) = pkg.name.split(':').next() else {
-            return false;
-        };
-        !self.maven_trust.trusted_fingerprints(group_id).is_empty()
-    }
-
     /// Fetch `{source}.asc` and verify the detached signature on the
     /// downloaded JAR bytes against key material resolved through the
-    /// keyring + keystore.
-    async fn verify_maven_pgp(&self, pkg: &LockedPackage, bytes: &[u8]) -> Result<()> {
+    /// keyring + lockfile TOFU + keystore.
+    ///
+    /// Returns `Ok(Some((group_id, fingerprint)))` when verification
+    /// succeeded under the first-install TOFU path and the caller should
+    /// record a new lockfile pin. Returns `Ok(None)` when verification
+    /// succeeded against an already-trusted fingerprint (either from
+    /// the keyring or an existing lockfile pin).
+    async fn verify_maven_pgp(
+        &self,
+        pkg: &LockedPackage,
+        bytes: &[u8],
+    ) -> Result<Option<(String, String)>> {
         // Parse groupId out of the Maven coordinate (format: `groupId:artifactId`).
         let group_id = pkg.name.split(':').next().ok_or_else(|| {
             CratonsError::Config(format!(
@@ -106,41 +153,81 @@ impl PackageDownloader {
             CratonsError::Network(format!("Failed to read .asc body: {}", e))
         })?;
 
-        // Determine the set of trusted fingerprints for this groupId.
-        // Under F-2b, TOFU is not yet implemented — if there's no entry,
-        // we fall through to "verify against any key the keystore can
-        // resolve from the .asc signer packet", which is weaker but
-        // matches the integrity-allowlist posture for Maven until F-2c.
-        let trusted = self.maven_trust.trusted_fingerprints(group_id);
+        // ------------------------------------------------------------
+        // Trust ladder: project/user keyring → lockfile TOFU → policy
+        // ------------------------------------------------------------
 
-        if trusted.is_empty() {
-            // Permissive path: we don't have a configured fingerprint,
-            // so we accept any signature whose signing key the keystore
-            // can locate from its embedded key ID. This still proves the
-            // artifact hasn't been modified since signing, which is the
-            // transport-integrity guarantee we're after here.
-            debug!(
-                group_id = %group_id,
-                "no explicit Maven trust entry; accepting any signature the keystore can verify"
-            );
-            // Extract the signer's key ID from the signature packet. Then
-            // probe the keystore — it will first check the cache, then
-            // HKP. Since we can't know the fingerprint without the key,
-            // we rely on the `.asc` itself to carry the long key ID and
-            // let the keystore's fingerprint-match check catch any
-            // substitution attempts.
-            return self.verify_with_embedded_key_id(pkg, bytes, &asc_armor).await;
+        // 1. Explicit project/user keyring entry — strict.
+        let configured = self.maven_trust.trusted_fingerprints(group_id);
+        if !configured.is_empty() {
+            self.verify_against_fingerprints(pkg, bytes, &asc_armor, &configured)
+                .await?;
+            return Ok(None); // no new pin — already in config
         }
 
-        // Strict path: try each configured trusted fingerprint in order
-        // until one verifies.
+        // 2. Existing lockfile TOFU pin — strict against the pinned fingerprint.
+        if let Some(pinned) = self.pgp_trust_snapshot.get(group_id) {
+            let pinned_ref = pinned.as_str();
+            self.verify_against_fingerprints(pkg, bytes, &asc_armor, &[pinned_ref])
+                .await?;
+            return Ok(None); // no new pin — already recorded in lockfile
+        }
+
+        // 3. First install. Dispatch on the first-install policy, with
+        //    `CRATONS_CI=1` upgrading `Warn` to `Deny`.
+        let policy = self.effective_first_install_policy();
+        match policy {
+            cratons_security::FirstInstallPolicy::Deny => Err(CratonsError::Config(format!(
+                "Maven groupId '{}' has no configured trusted key and no TOFU pin, \
+                 and first-install policy is Deny. Add an entry to \
+                 `[security.maven].trusted-keys` in cratons.toml, or run \
+                 interactively (without CRATONS_CI=1) to record a TOFU pin.",
+                group_id
+            ))),
+            cratons_security::FirstInstallPolicy::Warn
+            | cratons_security::FirstInstallPolicy::Allow => {
+                let fp = self
+                    .verify_and_extract_fingerprint(pkg, bytes, &asc_armor)
+                    .await?;
+                if matches!(policy, cratons_security::FirstInstallPolicy::Warn) {
+                    warn!(
+                        package = %pkg.name,
+                        version = %pkg.version,
+                        group_id = %group_id,
+                        fingerprint = %fp,
+                        tag = "pgp-tofu-pinned",
+                        "first-install TOFU: recording Maven signing fingerprint in lockfile"
+                    );
+                } else {
+                    debug!(
+                        package = %pkg.name,
+                        group_id = %group_id,
+                        fingerprint = %fp,
+                        "first-install TOFU (Allow): recording fingerprint silently"
+                    );
+                }
+                Ok(Some((group_id.to_string(), fp)))
+            }
+        }
+    }
+
+    /// Verify the `.asc` against one or more candidate fingerprints,
+    /// returning `Ok(())` on the first that verifies. Collects the
+    /// last failure for error reporting.
+    async fn verify_against_fingerprints(
+        &self,
+        pkg: &LockedPackage,
+        bytes: &[u8],
+        asc_armor: &str,
+        fingerprints: &[&str],
+    ) -> Result<()> {
         let keystore = self.keystore().await?;
         let mut last_error: Option<CratonsError> = None;
-        for fp in &trusted {
+        for fp in fingerprints {
             match keystore.fetch_key(fp).await {
                 Ok(key_armor) => {
                     let verifier = cratons_store::verify::ToolchainVerifier::new();
-                    match verifier.verify_gpg(bytes, &asc_armor, &key_armor) {
+                    match verifier.verify_gpg(bytes, asc_armor, &key_armor) {
                         Ok(_) => {
                             info!(
                                 package = %pkg.name,
@@ -164,40 +251,26 @@ impl PackageDownloader {
         }
         Err(last_error.unwrap_or_else(|| {
             CratonsError::Config(format!(
-                "No trusted fingerprint verified Maven artifact {} for groupId {}",
-                pkg.name, group_id
+                "No trusted fingerprint verified Maven artifact {}",
+                pkg.name
             ))
         }))
     }
 
-    /// Fallback for Maven packages with no configured trusted fingerprint.
-    /// Parses the `.asc` to extract the issuer fingerprint (modern
-    /// OpenPGP signatures) or long key ID (legacy), fetches that key
-    /// via the keystore's HKP path, and verifies.
-    ///
-    /// **Trust caveat**: with no configured fingerprint for the groupId,
-    /// this path only proves "the downloaded bytes are consistent with
-    /// what SOME key signed". It does not prove identity. A compromised
-    /// Maven Central registry could substitute both the JAR and its
-    /// `.asc` signed by an attacker-controlled key, and this path would
-    /// accept it. The hardcoded‑keyserver fetch *does* prevent one
-    /// specific attack (a rogue keyserver substituting the wrong key
-    /// for a known fingerprint), so this is still strictly better than
-    /// the pre-F-2 same-origin SHA-1 attestation.
-    ///
-    /// True authenticity requires a configured `[security.maven]`
-    /// trusted-keys entry (F-2c will add manifest-level config and
-    /// lockfile TOFU to ease the operator burden).
-    async fn verify_with_embedded_key_id(
+    /// First-install path: extract the issuer fingerprint from the
+    /// `.asc`, fetch the key via the keystore, verify the signature.
+    /// Returns the verified fingerprint on success so the caller can
+    /// record a TOFU pin.
+    async fn verify_and_extract_fingerprint(
         &self,
         pkg: &LockedPackage,
         bytes: &[u8],
         asc_armor: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         use pgp::composed::{Deserializable, DetachedSignature};
 
-        let (detached, _headers) = DetachedSignature::from_string(asc_armor)
-            .map_err(|e| {
+        let (detached, _headers) =
+            DetachedSignature::from_string(asc_armor).map_err(|e| {
                 CratonsError::Config(format!(
                     "Failed to parse detached PGP signature for {}: {}",
                     pkg.name, e
@@ -205,31 +278,19 @@ impl PackageDownloader {
             })?;
 
         // Prefer the issuer fingerprint subpacket (RFC 4880bis, v4+).
-        // Fall back to the issuer key ID (8-byte long ID) for older
-        // signatures — that path warns because long IDs are not
-        // collision-resistant enough for strict authenticity.
+        // Reject signatures that only carry a long key ID — 64 bits is
+        // not collision-resistant enough for a TOFU pin.
         let fingerprints = detached.signature.issuer_fingerprint();
-        let fp_hex = if let Some(fp) = fingerprints.first() {
-            cratons_security::normalize_fingerprint(&hex::encode_upper(fp.as_bytes()))?
-        } else {
-            let key_ids = detached.signature.issuer();
-            let Some(_kid) = key_ids.first() else {
-                return Err(CratonsError::Config(format!(
-                    "Detached PGP signature for {} has no issuer fingerprint or key ID",
-                    pkg.name
-                )));
-            };
-            warn!(
-                package = %pkg.name,
-                "PGP signature exposes only a 64-bit key ID; fingerprint lookup unavailable. \
-                 Configure `[security.maven].trusted-keys` in cratons.toml for strict auth."
-            );
+        let Some(fp) = fingerprints.first() else {
             return Err(CratonsError::Config(format!(
-                "Maven PGP verification for {}: signature lacks issuer fingerprint subpacket. \
-                 Add an explicit trusted-keys entry for groupId to enable strict verification.",
+                "Maven PGP signature for {} lacks an issuer-fingerprint subpacket. \
+                 Add a `[security.maven].trusted-keys` entry for this groupId to \
+                 install strictly, or upgrade the publisher to a modern GPG.",
                 pkg.name
             )));
         };
+        let fp_hex =
+            cratons_security::normalize_fingerprint(&hex::encode_upper(fp.as_bytes()))?;
 
         let keystore = self.keystore().await?;
         let key_armor = keystore.fetch_key(&fp_hex).await?;
@@ -239,9 +300,22 @@ impl PackageDownloader {
             package = %pkg.name,
             version = %pkg.version,
             fingerprint = %fp_hex,
-            "Maven PGP signature verified against keyserver-fetched key (no pinned trust)"
+            "Maven PGP signature verified against keyserver-fetched key (TOFU path)"
         );
-        Ok(())
+        Ok(fp_hex)
+    }
+
+    /// Compute the effective first-install policy, applying the
+    /// `CRATONS_CI=1` environment override that promotes `Warn` to
+    /// `Deny` for non-interactive automation.
+    fn effective_first_install_policy(&self) -> cratons_security::FirstInstallPolicy {
+        let base = self.maven_trust.first_install;
+        if matches!(base, cratons_security::FirstInstallPolicy::Warn)
+            && std::env::var("CRATONS_CI").ok().as_deref() == Some("1")
+        {
+            return cratons_security::FirstInstallPolicy::Deny;
+        }
+        base
     }
 
     /// Download a single package.
@@ -252,7 +326,11 @@ impl PackageDownloader {
     /// vulnerabilities. The integrity verification and content-addressed storage both
     /// operate on the same in-memory bytes, eliminating any window where the content
     /// could be swapped by an attacker.
-    pub async fn download(&self, pkg: &LockedPackage, store: &Store) -> Result<(PathBuf, u64)> {
+    pub async fn download(
+        &self,
+        pkg: &LockedPackage,
+        store: &Store,
+    ) -> Result<DownloadResult> {
         debug!(
             "Downloading {}@{} from {}",
             pkg.name, pkg.version, pkg.source
@@ -293,31 +371,32 @@ impl PackageDownloader {
             self.verify_download_integrity(pkg, &bytes)?;
         }
 
-        // F-2: Maven packages always run PGP verification at install time,
-        // independently of the `integrity` string (which is empty for
-        // Maven under the current policy — the resolver stopped fetching
-        // the same-origin SHA-1 in F-2b). This fetches `{source}.asc`
-        // over the network, resolves the signing key from the keyring
-        // (or keyserver-on-first-use), and verifies the detached
-        // signature against the downloaded JAR bytes. Under
-        // `IntegrityPolicy::Required`, failure aborts the install. Under
-        // the default allowlist policy, Maven is still allowlisted so
-        // a failure here is only logged as `integrity-degraded` — until
-        // Phase F-final flips the default.
+        // F-2 + F-2c: Maven packages run PGP verification at install
+        // time. Trust ladder (first match wins, all paths strict):
+        //
+        // 1. `[security.maven].trusted-keys` in project/user config
+        // 2. `[pgp-trust]` lockfile TOFU pin
+        // 3. First-install policy — Deny aborts, Warn/Allow verify
+        //    against the signature's embedded fingerprint and record
+        //    a new TOFU pin for the caller to persist.
+        //
+        // Any failure along the trust ladder is a hard error, even
+        // when `maven_trust_is_strict` returns false — there is no
+        // "permissive fallback" path anymore. This is the F-2c
+        // behavior change vs. F-2b.
+        let mut tofu_pin = None;
         if pkg.ecosystem == Ecosystem::Maven {
-            if let Err(e) = self.verify_maven_pgp(pkg, &bytes).await {
-                warn!(
-                    package = %pkg.name,
-                    version = %pkg.version,
-                    error = %e,
-                    "Maven PGP verification failed; integrity policy will decide whether to abort"
-                );
-                // The policy layer (InstallerConfig::integrity_policy)
-                // gets the final say upstream; here we only fail the
-                // download when the package was on the critical path
-                // and the caller asked for strict verification via the
-                // trust config.
-                if self.maven_trust_is_strict(pkg) {
+            match self.verify_maven_pgp(pkg, &bytes).await {
+                Ok(pin) => {
+                    tofu_pin = pin;
+                }
+                Err(e) => {
+                    warn!(
+                        package = %pkg.name,
+                        version = %pkg.version,
+                        error = %e,
+                        "Maven PGP verification failed"
+                    );
                     return Err(e);
                 }
             }
@@ -336,15 +415,24 @@ impl PackageDownloader {
             pkg.name, pkg.version, bytes_downloaded
         );
 
-        Ok((stored_path, bytes_downloaded))
+        Ok(DownloadResult {
+            path: stored_path,
+            bytes_downloaded,
+            tofu_pin,
+        })
     }
 
     /// Download multiple packages in parallel.
+    ///
+    /// Each parallel download task receives a clone of the shared
+    /// `maven_trust` and `pgp_trust_snapshot` so all tasks see the
+    /// same TOFU baseline. New pins flow back via
+    /// `DownloadResult.tofu_pin` and are aggregated by the caller.
     pub async fn download_all(
         &self,
         packages: &[&LockedPackage],
         store: &Store,
-    ) -> Result<Vec<(PathBuf, u64)>> {
+    ) -> Result<Vec<DownloadResult>> {
         let semaphore = Arc::new(Semaphore::new(self.concurrency));
 
         let downloads: Vec<_> = packages
@@ -354,14 +442,24 @@ impl PackageDownloader {
                 let client = self.client.clone();
                 let pkg = (*pkg).clone();
                 let store_root = store.root().to_path_buf();
+                let maven_trust = Arc::clone(&self.maven_trust);
+                let pgp_snapshot = Arc::clone(&self.pgp_trust_snapshot);
+                let keystore = Arc::clone(&self.maven_keystore);
 
                 async move {
                     let _permit = semaphore.acquire().await.map_err(|_| {
                         CratonsError::Config("Download semaphore closed unexpectedly".into())
                     })?;
 
-                    // Re-create downloader for this task
-                    let downloader = PackageDownloader::new(client, 1);
+                    // Re-create downloader for this task, preserving the
+                    // F-2c trust state.
+                    let downloader = PackageDownloader {
+                        client,
+                        concurrency: 1,
+                        maven_trust,
+                        maven_keystore: keystore,
+                        pgp_trust_snapshot: pgp_snapshot,
+                    };
 
                     // Need to re-open store since it's not Send
                     let store = Store::open(&store_root).map_err(|e| {
@@ -373,18 +471,18 @@ impl PackageDownloader {
             })
             .collect();
 
-        let results: Vec<Result<(PathBuf, u64)>> = stream::iter(downloads)
+        let results: Vec<Result<DownloadResult>> = stream::iter(downloads)
             .buffer_unordered(self.concurrency)
             .collect()
             .await;
 
         // Collect results, failing on first error
-        let mut paths = Vec::with_capacity(packages.len());
+        let mut out = Vec::with_capacity(packages.len());
         for result in results {
-            paths.push(result?);
+            out.push(result?);
         }
 
-        Ok(paths)
+        Ok(out)
     }
 
     /// Get appropriate filename for a package download.

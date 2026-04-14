@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use cratons_core::{ContentHash, CratonsError, Ecosystem, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -126,6 +126,21 @@ pub struct Lockfile {
     #[serde(default)]
     pub artifacts: HashMap<String, ArtifactCache>,
 
+    /// PGP trust-on-first-use pins (F-2c).
+    ///
+    /// Maps a Maven groupId to the OpenPGP fingerprint that signed its
+    /// first-ever install in this project. Subsequent installs must
+    /// present a signature matching this fingerprint, giving operators
+    /// an audit trail for signer identity that survives keyserver
+    /// rotation and key compromise.
+    ///
+    /// The map is a `BTreeMap` so serialized output is deterministic —
+    /// critical for reproducible lockfile diffs in code review.
+    /// Serialized as the `[pgp-trust]` TOML table. Empty maps are
+    /// omitted from the serialized lockfile.
+    #[serde(default, rename = "pgp-trust", skip_serializing_if = "BTreeMap::is_empty")]
+    pub pgp_trust: BTreeMap<String, String>,
+
     /// Cryptographic signature over the lockfile content (for supply chain security).
     /// When present, verifies the lockfile hasn't been tampered with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -165,9 +180,30 @@ impl Lockfile {
             toolchains: HashMap::new(),
             packages: Vec::new(),
             artifacts: HashMap::new(),
+            pgp_trust: BTreeMap::new(),
             signature: None,
             package_index: HashMap::new(),
         }
+    }
+
+    /// Record a trust-on-first-use PGP fingerprint pin for a Maven groupId.
+    ///
+    /// Called by the installer after a successful TOFU first-install
+    /// verification, via `InstallResult.pgp_trust_updates`. Overwrites
+    /// any existing entry — callers are expected to gate this behind a
+    /// successful verification path, so overwrites are audit-visible
+    /// in the lockfile diff.
+    pub fn record_pgp_trust(&mut self, group_id: impl Into<String>, fingerprint: impl Into<String>) {
+        self.pgp_trust.insert(group_id.into(), fingerprint.into());
+    }
+
+    /// Return the pinned fingerprint for a Maven groupId, if any.
+    ///
+    /// F-2c: used by the installer's install-time trust resolver to
+    /// enforce the pin on every install after the first.
+    #[must_use]
+    pub fn get_pgp_trust(&self, group_id: &str) -> Option<&str> {
+        self.pgp_trust.get(group_id).map(String::as_str)
     }
 
     /// Rebuild the package index for O(1) lookups.
@@ -818,6 +854,58 @@ mod tests {
         assert_eq!(lockfile.version, LOCKFILE_VERSION);
         assert!(lockfile.is_fresh(&manifest_hash));
         assert!(lockfile.packages.is_empty());
+        assert!(lockfile.pgp_trust.is_empty());
+    }
+
+    #[test]
+    fn pgp_trust_record_and_lookup() {
+        let mut lockfile = Lockfile::new(ContentHash::blake3("h".into()));
+        lockfile.record_pgp_trust("org.apache.commons", "AABBCCDDEEFF00112233");
+        assert_eq!(
+            lockfile.get_pgp_trust("org.apache.commons"),
+            Some("AABBCCDDEEFF00112233")
+        );
+        assert_eq!(lockfile.get_pgp_trust("com.example.other"), None);
+    }
+
+    #[test]
+    fn pgp_trust_is_omitted_when_empty() {
+        let manifest_hash = ContentHash::blake3("test".into());
+        let lockfile = Lockfile::new(manifest_hash);
+        let toml_str = toml::to_string(&lockfile).expect("serialize");
+        // Empty pgp_trust must not produce a [pgp-trust] section in the
+        // serialized output, so existing lockfiles don't grow a new
+        // boilerplate table.
+        assert!(
+            !toml_str.contains("[pgp-trust]"),
+            "empty pgp_trust should be omitted, got:\n{}",
+            toml_str
+        );
+    }
+
+    #[test]
+    fn pgp_trust_round_trip_is_deterministic() {
+        // BTreeMap ordering means the serialized form is stable
+        // regardless of insertion order — critical for reproducible
+        // lockfile diffs in code review. Other Lockfile fields
+        // (timestamps, generated_by) vary run-to-run; this test
+        // serializes only the `pgp_trust` submap to isolate the
+        // invariant we care about.
+        let mut a: BTreeMap<String, String> = BTreeMap::new();
+        a.insert("org.zzz.late".into(), "Z".repeat(40));
+        a.insert("com.aaa.early".into(), "A".repeat(40));
+        a.insert("org.mmm.middle".into(), "M".repeat(40));
+
+        let mut b: BTreeMap<String, String> = BTreeMap::new();
+        b.insert("org.mmm.middle".into(), "M".repeat(40));
+        b.insert("com.aaa.early".into(), "A".repeat(40));
+        b.insert("org.zzz.late".into(), "Z".repeat(40));
+
+        assert_eq!(
+            toml::to_string(&a).unwrap(),
+            toml::to_string(&b).unwrap(),
+            "insertion order must not affect serialized form"
+        );
     }
 
     #[test]

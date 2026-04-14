@@ -11,6 +11,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use miette::{IntoDiagnostic, Result, WrapErr};
 use owo_colors::OwoColorize;
 use std::path::{Path, PathBuf};
+use tracing::info;
 use workspace::WorkspaceOpts;
 
 /// Initialize a new project.
@@ -391,12 +392,10 @@ async fn install_async(
     // Configure installer. Sandbox policy comes from the CLI flag and
     // controls what happens when the host cannot provide the requested
     // isolation — by default, the install is aborted. See `SandboxPolicy`
-    // for the full semantics. Integrity policy defaults to
-    // `RequiredWithEcosystemAllowlist([Go, Maven])` until those ecosystems
-    // have independent integrity anchors. The default constructor loads
-    // the user-level Maven PGP keyring from
-    // `~/.config/cratons/trusted-keys/maven.toml` if present; F-2b does
-    // not yet wire project-level `[security.maven]` manifest config.
+    // for the full semantics. Integrity policy defaults to `Required`
+    // post-F-final. Maven PGP trust is loaded from the manifest's
+    // `[security.maven]` section (F-2c) falling back to the user-level
+    // keyring at `~/.config/cratons/trusted-keys/maven.toml`.
     let config = InstallerConfig {
         concurrency: 8,
         run_scripts: true,
@@ -405,17 +404,33 @@ async fn install_async(
         integrity_policy: cratons_installer::IntegrityPolicy::default(),
         link_strategy: LinkStrategy::Symlink,
         ecosystems: None, // Install all ecosystems
-        ..InstallerConfig::default()
+        ..InstallerConfig::from_manifest(&manifest)
     };
 
     // Run installation
     let installer = cratons_installer::Installer::with_config(&store, config);
-    let result = installer
+    let mut result = installer
         .install(&lockfile, &project_dir)
         .await
         .map_err(|e| miette::miette!("Installation failed: {}", e))?;
 
     pb.finish_and_clear();
+
+    // F-2c: persist any TOFU pins the installer collected during this
+    // run. This is the single write point for lockfile `[pgp-trust]`
+    // updates; keeping it in the CLI layer ensures that a failed install
+    // never leaves the lockfile partially modified on disk.
+    if !result.pgp_trust_updates.is_empty() {
+        let mut updated_lockfile = lockfile.clone();
+        let pin_count = result.pgp_trust_updates.len();
+        for (group_id, fingerprint) in result.pgp_trust_updates.drain() {
+            updated_lockfile.record_pgp_trust(group_id, fingerprint);
+        }
+        updated_lockfile
+            .save(&lockfile_path)
+            .map_err(|e| miette::miette!("Failed to persist PGP TOFU pins: {}", e))?;
+        info!(count = pin_count, "recorded new PGP TOFU pins in lockfile");
+    }
 
     // Print summary
     println!();

@@ -64,6 +64,15 @@ pub struct Manifest {
     #[serde(default)]
     pub target: HashMap<String, TargetConfig>,
 
+    /// Supply-chain security policy overrides (F-2c).
+    ///
+    /// Project-level trust configuration for ecosystems that use
+    /// external signature verification. Currently only Maven is
+    /// supported; more ecosystems will be added as they gain equivalent
+    /// verification paths.
+    #[serde(default)]
+    pub security: SecurityConfig,
+
     /// Path to the manifest file (not serialized)
     #[serde(skip)]
     pub manifest_path: Option<PathBuf>,
@@ -84,9 +93,78 @@ impl Default for Manifest {
             resolution: HashMap::new(),
             workspace: None,
             target: HashMap::new(),
+            security: SecurityConfig::default(),
             manifest_path: None,
         }
     }
+}
+
+/// Project-level supply-chain security configuration (`[security.*]`).
+///
+/// Kept as a serde-structural type in `cratons-manifest` to avoid a
+/// dependency on `cratons-security`. The installer converts this into
+/// `cratons_security::MavenTrustConfig` at install time.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct SecurityConfig {
+    /// Maven PGP trust configuration.
+    #[serde(default)]
+    pub maven: MavenSecurityConfig,
+}
+
+/// Project-level Maven PGP trust config.
+///
+/// Maps to `cratons_security::MavenTrustConfig` at runtime. The fields
+/// mirror the user-level `~/.config/cratons/trusted-keys/maven.toml`
+/// shape so operators can copy-paste entries between the two.
+///
+/// # Example `[security.maven]` section
+///
+/// ```toml
+/// [security.maven]
+/// first-install = "deny"
+///
+/// [[security.maven.trusted-keys]]
+/// group-id = "org.apache.*"
+/// fingerprint = "AABBCCDDEEFF00112233445566778899AABBCCDD"
+///
+/// [[security.maven.trusted-keys]]
+/// group-id = "com.google.guava"
+/// fingerprint = "1122334455667788990011223344556677889900"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct MavenSecurityConfig {
+    /// Explicit (groupId-glob, fingerprint) pins. Highest precedence in
+    /// the trust resolution order (project > user > TOFU).
+    #[serde(default, rename = "trusted-keys")]
+    pub trusted_keys: Vec<ManifestTrustedKey>,
+
+    /// First-install policy for packages whose groupId has neither a
+    /// configured entry nor a lockfile TOFU pin.
+    ///
+    /// Valid values: `"deny"`, `"warn"`, `"allow"`. Defaults to `"warn"`
+    /// interactively; the installer upgrades to `"deny"` automatically
+    /// when the `CRATONS_CI` environment variable is set to `"1"`.
+    #[serde(default, rename = "first-install")]
+    pub first_install: Option<String>,
+
+    /// Override the compiled-in default keyserver list
+    /// (`keys.openpgp.org`, `keyserver.ubuntu.com`).
+    #[serde(default)]
+    pub keyservers: Vec<String>,
+}
+
+/// One manifest-level trusted-key entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ManifestTrustedKey {
+    /// Glob pattern matched against Maven group IDs (e.g. `"org.apache.*"`).
+    #[serde(rename = "group-id")]
+    pub group_id: String,
+    /// Uppercase, no-space PGP fingerprint (40 hex chars for v4 keys).
+    /// Case/whitespace-normalized at the installer boundary.
+    pub fingerprint: String,
 }
 
 impl Manifest {
@@ -451,6 +529,63 @@ version = "1.0.0"
         let manifest = Manifest::from_str(content).unwrap();
         assert_eq!(manifest.package.name, "my-app");
         assert_eq!(manifest.package.version, "1.0.0");
+        // F-2c: security section defaults to empty.
+        assert!(manifest.security.maven.trusted_keys.is_empty());
+        assert!(manifest.security.maven.first_install.is_none());
+    }
+
+    #[test]
+    fn parse_security_maven_section() {
+        let content = r#"
+[package]
+name = "my-app"
+version = "1.0.0"
+
+[security.maven]
+first-install = "deny"
+keyservers = ["https://internal.example/"]
+
+[[security.maven.trusted-keys]]
+group-id = "org.apache.*"
+fingerprint = "AABBCCDDEEFF00112233445566778899AABBCCDD"
+
+[[security.maven.trusted-keys]]
+group-id = "com.google.guava"
+fingerprint = "1122334455667788990011223344556677889900"
+"#;
+        let manifest = Manifest::from_str(content).unwrap();
+        assert_eq!(manifest.security.maven.first_install.as_deref(), Some("deny"));
+        assert_eq!(
+            manifest.security.maven.keyservers,
+            vec!["https://internal.example/"]
+        );
+        assert_eq!(manifest.security.maven.trusted_keys.len(), 2);
+        assert_eq!(
+            manifest.security.maven.trusted_keys[0].group_id,
+            "org.apache.*"
+        );
+        assert_eq!(
+            manifest.security.maven.trusted_keys[0].fingerprint,
+            "AABBCCDDEEFF00112233445566778899AABBCCDD"
+        );
+    }
+
+    #[test]
+    fn parse_security_maven_section_partial() {
+        // Only a trusted-keys entry, no first-install or keyservers.
+        let content = r#"
+[package]
+name = "my-app"
+version = "1.0.0"
+
+[[security.maven.trusted-keys]]
+group-id = "org.slf4j"
+fingerprint = "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF"
+"#;
+        let manifest = Manifest::from_str(content).unwrap();
+        assert_eq!(manifest.security.maven.trusted_keys.len(), 1);
+        assert!(manifest.security.maven.first_install.is_none());
+        assert!(manifest.security.maven.keyservers.is_empty());
     }
 
     #[test]

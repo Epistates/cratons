@@ -190,6 +190,88 @@ impl Default for InstallerConfig {
     }
 }
 
+impl InstallerConfig {
+    /// Build an [`InstallerConfig`] from a parsed manifest, overlaying
+    /// the manifest's `[security.maven]` section onto the default
+    /// user-level Maven trust configuration.
+    ///
+    /// Precedence for Maven trust resolution:
+    ///
+    /// 1. **Project** (`cratons.toml` `[security.maven]`) — highest.
+    /// 2. **User** (`~/.config/cratons/trusted-keys/maven.toml`).
+    /// 3. **TOFU** (`cratons.lock` `[pgp-trust]` table).
+    /// 4. **First-install policy** (`Deny` in CI, `Warn` interactively).
+    ///
+    /// The project config does **not** merge with the user config —
+    /// if a project defines any `[security.maven]` section at all, its
+    /// trusted-keys list and first-install policy fully override the
+    /// user-level equivalents for that run. This matches operator
+    /// intuition ("the manifest is the source of truth for this repo")
+    /// and gives strict deployments a clean knob to cut off sloppy
+    /// machine-global defaults.
+    ///
+    /// When the manifest has no `[security.maven]` section at all, the
+    /// returned config is identical to [`InstallerConfig::default()`].
+    pub fn from_manifest(manifest: &cratons_manifest::Manifest) -> Self {
+        let mut cfg = Self::default();
+
+        // The manifest-level security config is optional and lives in
+        // `manifest.security.maven`. If every field is the zero value,
+        // we treat the section as absent and fall through to the
+        // user-level config loaded by Default.
+        let maven = &manifest.security.maven;
+        let has_manifest_maven_config = !maven.trusted_keys.is_empty()
+            || maven.first_install.is_some()
+            || !maven.keyservers.is_empty();
+        if !has_manifest_maven_config {
+            return cfg;
+        }
+
+        // Convert the manifest types (plain serde structs, no dep on
+        // cratons-security) into runtime `MavenTrustConfig`.
+        let trusted_keys: Vec<cratons_security::TrustedKeyEntry> = maven
+            .trusted_keys
+            .iter()
+            .map(|e| cratons_security::TrustedKeyEntry {
+                group_id: e.group_id.clone(),
+                fingerprint: e.fingerprint.clone(),
+            })
+            .collect();
+
+        let first_install = maven
+            .first_install
+            .as_deref()
+            .map(parse_first_install_policy)
+            .unwrap_or_default();
+
+        cfg.maven_trust = Arc::new(cratons_security::MavenTrustConfig {
+            trusted_keys,
+            first_install,
+            keyservers: maven.keyservers.clone(),
+        });
+
+        cfg
+    }
+}
+
+/// Parse a `first-install` string value from the manifest into the
+/// typed enum, falling back to the default (`Warn`) on an unknown value
+/// and emitting a structured warn event so operators can catch typos.
+fn parse_first_install_policy(raw: &str) -> cratons_security::FirstInstallPolicy {
+    match raw.to_ascii_lowercase().as_str() {
+        "deny" => cratons_security::FirstInstallPolicy::Deny,
+        "warn" => cratons_security::FirstInstallPolicy::Warn,
+        "allow" => cratons_security::FirstInstallPolicy::Allow,
+        other => {
+            warn!(
+                value = %other,
+                "unknown [security.maven] first-install value; using default (Warn)"
+            );
+            cratons_security::FirstInstallPolicy::default()
+        }
+    }
+}
+
 /// Load the default user-level Maven trust config from
 /// `~/.config/cratons/trusted-keys/maven.toml`, returning an empty config
 /// on `ENOENT` and panicking only on a malformed existing file.
@@ -242,6 +324,16 @@ pub struct InstallResult {
     pub environment_setup: bool,
     /// Path to activation script
     pub activation_script: Option<PathBuf>,
+    /// PGP trust-on-first-use fingerprints collected during this install
+    /// (F-2c).
+    ///
+    /// Maps Maven groupId → OpenPGP fingerprint that signed the package
+    /// in a successful first-install verification. The CLI command is
+    /// responsible for merging these into `lockfile.pgp_trust` and
+    /// persisting the updated lockfile. The installer never mutates the
+    /// lockfile in place — keeping the read/write split clean makes
+    /// failed installs not corrupt on-disk state.
+    pub pgp_trust_updates: HashMap<String, String>,
 }
 
 /// Per-ecosystem installation result.
@@ -262,6 +354,10 @@ pub struct EcosystemResult {
     /// installed under [`IntegrityPolicy::RequiredWithEcosystemAllowlist`]).
     /// Aggregated into [`InstallResult::warnings`] by the top-level loop.
     pub warnings: Vec<String>,
+    /// PGP TOFU pins recorded for this ecosystem (F-2c). Currently only
+    /// populated for Maven. Aggregated into
+    /// [`InstallResult::pgp_trust_updates`] by the top-level loop.
+    pub pgp_trust_updates: HashMap<String, String>,
 }
 
 /// Status of a single package installation.
@@ -324,6 +420,15 @@ impl<'a> Installer<'a> {
             lockfile.package_count()
         );
 
+        // F-2c: snapshot the lockfile's [pgp-trust] TOFU table at the
+        // start of the install. The downloader reads this for strict
+        // enforcement of existing pins; any new pins flow back up via
+        // `DownloadResult.tofu_pin` → `EcosystemResult.pgp_trust_updates`
+        // → `InstallResult.pgp_trust_updates`, and the CLI merges them
+        // into the lockfile after the install succeeds.
+        let pgp_snapshot = Arc::new(lockfile.pgp_trust.clone());
+        let downloader = self.downloader.with_lockfile_trust(pgp_snapshot);
+
         let mut result = InstallResult {
             packages_installed: 0,
             packages_cached: 0,
@@ -334,6 +439,7 @@ impl<'a> Installer<'a> {
             warnings: Vec::new(),
             environment_setup: false,
             activation_script: None,
+            pgp_trust_updates: HashMap::new(),
         };
 
         // Topologically sort packages by dependencies to ensure correct installation order
@@ -360,7 +466,7 @@ impl<'a> Installer<'a> {
             info!("Installing {} {} packages", packages.len(), ecosystem);
 
             let eco_result = self
-                .install_ecosystem(ecosystem, &packages, project_dir)
+                .install_ecosystem(ecosystem, &packages, project_dir, &downloader)
                 .await?;
 
             result.packages_installed += eco_result.packages;
@@ -371,6 +477,13 @@ impl<'a> Installer<'a> {
             // Bubble per-ecosystem structured warnings up to the top-level
             // result so CI/audit tooling can scrape them from one place.
             result.warnings.extend(eco_result.warnings.iter().cloned());
+
+            // F-2c: bubble up TOFU pins.
+            for (group_id, fingerprint) in &eco_result.pgp_trust_updates {
+                result
+                    .pgp_trust_updates
+                    .insert(group_id.clone(), fingerprint.clone());
+            }
 
             result.ecosystems.insert(ecosystem, eco_result);
         }
@@ -483,6 +596,7 @@ impl<'a> Installer<'a> {
         ecosystem: Ecosystem,
         packages: &[&LockedPackage],
         project_dir: &Path,
+        downloader: &PackageDownloader,
     ) -> Result<EcosystemResult> {
         let mut eco_result = EcosystemResult::default();
 
@@ -498,8 +612,13 @@ impl<'a> Installer<'a> {
         std::fs::create_dir_all(&install_dir)?;
         eco_result.install_dir = Some(install_dir.clone());
 
-        // Download and extract packages
-        let statuses = self.download_and_extract(packages).await?;
+        // Download and extract packages. F-2c: collect any TOFU pins
+        // the downloader emits into this ecosystem's result so the
+        // top-level install loop can merge them into `InstallResult`
+        // and the CLI can persist them to the lockfile.
+        let (statuses, pgp_trust_updates) =
+            self.download_and_extract(packages, downloader).await?;
+        eco_result.pgp_trust_updates.extend(pgp_trust_updates);
 
         // Link packages to project
         let linker = PackageLinker::new(self.store, self.config.link_strategy);
@@ -524,12 +643,15 @@ impl<'a> Installer<'a> {
         Ok(eco_result)
     }
 
-    /// Download and extract packages, returning their installation status.
+    /// Download and extract packages, returning their installation
+    /// status plus any PGP TOFU pins recorded during the download pass.
     async fn download_and_extract(
         &self,
         packages: &[&LockedPackage],
-    ) -> Result<Vec<PackageInstallStatus>> {
+        downloader: &PackageDownloader,
+    ) -> Result<(Vec<PackageInstallStatus>, HashMap<String, String>)> {
         let mut statuses = Vec::with_capacity(packages.len());
+        let mut pgp_pins: HashMap<String, String> = HashMap::new();
 
         // Check cache and collect packages to download
         let mut to_download: Vec<&LockedPackage> = Vec::new();
@@ -553,17 +675,18 @@ impl<'a> Installer<'a> {
             }
         }
 
-        // Download missing packages in parallel
+        // Download missing packages in parallel. Use the per-install
+        // downloader handle passed in from the top-level `install()`,
+        // which carries the lockfile `[pgp-trust]` snapshot.
         if !to_download.is_empty() {
             info!("Downloading {} packages...", to_download.len());
-            let downloaded = self
-                .downloader
+            let downloaded = downloader
                 .download_all(&to_download, self.store)
                 .await?;
 
-            for (pkg, (path, bytes)) in to_download.iter().zip(downloaded) {
+            for (pkg, dl) in to_download.iter().zip(downloaded) {
                 // Extract the package
-                let extracted_path = self.extractor.extract(&path, pkg.ecosystem, self.store)?;
+                let extracted_path = self.extractor.extract(&dl.path, pkg.ecosystem, self.store)?;
 
                 // Verify content-hash integrity after extraction. Empty
                 // integrity is already policy-gated earlier in
@@ -575,18 +698,24 @@ impl<'a> Installer<'a> {
                     self.verify_integrity(pkg, &extracted_path)?;
                 }
 
+                // Collect any TOFU pin emitted by the downloader for this
+                // package (F-2c).
+                if let Some((group_id, fingerprint)) = dl.tofu_pin {
+                    pgp_pins.insert(group_id, fingerprint);
+                }
+
                 statuses.push(PackageInstallStatus {
                     name: pkg.name.clone(),
                     version: pkg.version.clone(),
                     ecosystem: pkg.ecosystem,
                     cached: false,
-                    bytes_downloaded: bytes,
+                    bytes_downloaded: dl.bytes_downloaded,
                     install_path: extracted_path,
                 });
             }
         }
 
-        Ok(statuses)
+        Ok((statuses, pgp_pins))
     }
 
     /// Get the installation directory for an ecosystem.
@@ -900,6 +1029,7 @@ mod tests {
             warnings: Vec::new(),
             environment_setup: true,
             activation_script: Some(PathBuf::from("/project/.cratons/activate")),
+            pgp_trust_updates: HashMap::new(),
         };
 
         assert_eq!(result.packages_installed, 10);

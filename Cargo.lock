@@ -1278,6 +1278,7 @@ dependencies = [
  "cratons-core",
  "cratons-environment",
  "cratons-lockfile",
+ "cratons-manifest",
  "cratons-resolver",
  "cratons-sandbox",
  "cratons-security",
