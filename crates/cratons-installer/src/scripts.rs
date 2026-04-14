@@ -633,10 +633,8 @@ mod tests {
     #[test]
     fn missing_capabilities_process_isolation_misses_everything() {
         let cfg = post_install_config();
-        let missing = PostInstallRunner::missing_capabilities(
-            cratons_sandbox::IsolationLevel::Process,
-            &cfg,
-        );
+        let missing =
+            PostInstallRunner::missing_capabilities(cratons_sandbox::IsolationLevel::Process, &cfg);
         // Process isolation has none of network/filesystem/resource limits.
         assert!(missing.contains(&"network_isolation"));
         assert!(missing.contains(&"filesystem_isolation"));
@@ -646,10 +644,8 @@ mod tests {
     #[test]
     fn missing_capabilities_none_level_misses_everything() {
         let cfg = post_install_config();
-        let missing = PostInstallRunner::missing_capabilities(
-            cratons_sandbox::IsolationLevel::None,
-            &cfg,
-        );
+        let missing =
+            PostInstallRunner::missing_capabilities(cratons_sandbox::IsolationLevel::None, &cfg);
         assert_eq!(missing.len(), 3);
     }
 
@@ -661,10 +657,8 @@ mod tests {
         use cratons_sandbox::config::{NetworkAccess, SandboxConfig};
         let cfg = SandboxConfig::new(vec!["sh".into(), "-c".into(), "true".into()])
             .with_network(NetworkAccess::Full);
-        let missing = PostInstallRunner::missing_capabilities(
-            cratons_sandbox::IsolationLevel::Process,
-            &cfg,
-        );
+        let missing =
+            PostInstallRunner::missing_capabilities(cratons_sandbox::IsolationLevel::Process, &cfg);
         assert!(
             !missing.contains(&"network_isolation"),
             "should not require network isolation when caller opted out"

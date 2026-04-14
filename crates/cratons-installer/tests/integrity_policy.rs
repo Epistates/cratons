@@ -76,7 +76,9 @@ async fn required_policy_rejects_empty_integrity_for_npm() {
     let msg = err.to_string();
     assert!(
         msg.contains("test-package")
-            && (msg.contains("Checksum mismatch") || msg.contains("checksum") || msg.contains("integrity")),
+            && (msg.contains("Checksum mismatch")
+                || msg.contains("checksum")
+                || msg.contains("integrity")),
         "expected checksum-mismatch-style error, got: {msg}"
     );
 }

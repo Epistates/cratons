@@ -280,15 +280,14 @@ fn default_user_maven_trust() -> cratons_security::MavenTrustConfig {
         return cratons_security::MavenTrustConfig::default();
     };
     let path = base.join("cratons").join("trusted-keys").join("maven.toml");
-    cratons_security::MavenTrustConfig::load_or_default(&path)
-        .unwrap_or_else(|e| {
-            warn!(
-                path = %path.display(),
-                error = %e,
-                "failed to load user Maven trust config; using empty default"
-            );
-            cratons_security::MavenTrustConfig::default()
-        })
+    cratons_security::MavenTrustConfig::load_or_default(&path).unwrap_or_else(|e| {
+        warn!(
+            path = %path.display(),
+            error = %e,
+            "failed to load user Maven trust config; using empty default"
+        );
+        cratons_security::MavenTrustConfig::default()
+    })
 }
 
 /// Strategy for linking packages from CAS to project.
@@ -616,8 +615,7 @@ impl<'a> Installer<'a> {
         // the downloader emits into this ecosystem's result so the
         // top-level install loop can merge them into `InstallResult`
         // and the CLI can persist them to the lockfile.
-        let (statuses, pgp_trust_updates) =
-            self.download_and_extract(packages, downloader).await?;
+        let (statuses, pgp_trust_updates) = self.download_and_extract(packages, downloader).await?;
         eco_result.pgp_trust_updates.extend(pgp_trust_updates);
 
         // Link packages to project
@@ -680,13 +678,13 @@ impl<'a> Installer<'a> {
         // which carries the lockfile `[pgp-trust]` snapshot.
         if !to_download.is_empty() {
             info!("Downloading {} packages...", to_download.len());
-            let downloaded = downloader
-                .download_all(&to_download, self.store)
-                .await?;
+            let downloaded = downloader.download_all(&to_download, self.store).await?;
 
             for (pkg, dl) in to_download.iter().zip(downloaded) {
                 // Extract the package
-                let extracted_path = self.extractor.extract(&dl.path, pkg.ecosystem, self.store)?;
+                let extracted_path = self
+                    .extractor
+                    .extract(&dl.path, pkg.ecosystem, self.store)?;
 
                 // Verify content-hash integrity after extraction. Empty
                 // integrity is already policy-gated earlier in
@@ -757,11 +755,12 @@ impl<'a> Installer<'a> {
         &self,
         packages: &'b [LockedPackage],
     ) -> Result<Vec<&'b LockedPackage>> {
-        // Build name -> index mapping
-        let name_to_idx: HashMap<&str, usize> = packages
+        // Build exact package identity -> index mapping so parallel versions
+        // remain distinct during installation ordering.
+        let package_to_idx: HashMap<(Ecosystem, &str, &str), usize> = packages
             .iter()
             .enumerate()
-            .map(|(i, p)| (p.name.as_str(), i))
+            .map(|(i, p)| ((p.ecosystem, p.name.as_str(), p.version.as_str()), i))
             .collect();
 
         // Build dependency graph
@@ -775,7 +774,11 @@ impl<'a> Installer<'a> {
         // Add edges for dependencies
         for (idx, pkg) in packages.iter().enumerate() {
             for dep_ref in &pkg.dependencies {
-                if let Some(&dep_idx) = name_to_idx.get(dep_ref.name.as_str()) {
+                if let Some(&dep_idx) = package_to_idx.get(&(
+                    pkg.ecosystem,
+                    dep_ref.name.as_str(),
+                    dep_ref.version.as_str(),
+                )) {
                     // Edge from dependency to dependent (dep must be installed first)
                     graph.add_edge(dep_idx, idx, ());
                 }
@@ -821,7 +824,11 @@ impl<'a> Installer<'a> {
                 continue;
             }
 
-            if self.config.integrity_policy.allows_empty_integrity(ecosystem) {
+            if self
+                .config
+                .integrity_policy
+                .allows_empty_integrity(ecosystem)
+            {
                 let msg = format!(
                     "integrity-degraded: {}@{} ({:?}) installed without registry integrity; \
                      ecosystem is on the allowlist. Follow-up: implement an independent \

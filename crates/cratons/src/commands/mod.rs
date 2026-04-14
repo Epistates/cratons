@@ -1327,12 +1327,12 @@ pub fn tree(all: bool, depth: Option<usize>) -> Result<()> {
     };
 
     // Build a lookup map for packages in the lockfile
-    let package_map: HashMap<(String, Ecosystem), _> = lockfile
+    let package_map: HashMap<(String, Ecosystem, String), _> = lockfile
         .as_ref()
         .map(|lf| {
             lf.packages
                 .iter()
-                .map(|p| ((p.name.clone(), p.ecosystem), p))
+                .map(|p| ((p.name.clone(), p.ecosystem, p.version.clone()), p))
                 .collect()
         })
         .unwrap_or_default();
@@ -1352,8 +1352,8 @@ pub fn tree(all: bool, depth: Option<usize>) -> Result<()> {
         name: &str,
         ecosystem: Ecosystem,
         version: &str,
-        package_map: &HashMap<(String, Ecosystem), &cratons_lockfile::LockedPackage>,
-        visited: &mut HashSet<(String, Ecosystem)>,
+        package_map: &HashMap<(String, Ecosystem, String), &cratons_lockfile::LockedPackage>,
+        visited: &mut HashSet<(String, Ecosystem, String)>,
         prefix: &str,
         is_last: bool,
         current_depth: usize,
@@ -1378,7 +1378,7 @@ pub fn tree(all: bool, depth: Option<usize>) -> Result<()> {
         }
 
         // Check for cycles
-        let key = (name.to_string(), ecosystem);
+        let key = (name.to_string(), ecosystem, version.to_string());
         if visited.contains(&key) {
             let next_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
             println!("{}└── {}", next_prefix, "(circular)".yellow());
@@ -1388,7 +1388,8 @@ pub fn tree(all: bool, depth: Option<usize>) -> Result<()> {
 
         // Get transitive dependencies if showing all
         if all {
-            if let Some(pkg) = package_map.get(&(name.to_string(), ecosystem)) {
+            if let Some(pkg) = package_map.get(&(name.to_string(), ecosystem, version.to_string()))
+            {
                 let deps = &pkg.dependencies;
                 let dep_count = deps.len();
 
@@ -1399,7 +1400,7 @@ pub fn tree(all: bool, depth: Option<usize>) -> Result<()> {
 
                     // Look up the transitive dep in the package map
                     let dep_version = package_map
-                        .get(&(dep.name.clone(), ecosystem))
+                        .get(&(dep.name.clone(), ecosystem, dep.version.clone()))
                         .map(|p| p.version.as_str())
                         .unwrap_or(&dep.version);
 
@@ -1427,7 +1428,7 @@ pub fn tree(all: bool, depth: Option<usize>) -> Result<()> {
         let is_last = i == dep_count - 1;
         let version = lockfile
             .as_ref()
-            .and_then(|lf| lf.find_package(name, *eco))
+            .and_then(|lf| lf.find_direct_package(name, *eco))
             .map(|p| p.version.as_str())
             .unwrap_or_else(|| dep.version().unwrap_or("*"));
 
@@ -1522,15 +1523,17 @@ pub fn why(package: &str) -> Result<()> {
         return Ok(());
     }
 
+    type PackageNodeKey = (String, Ecosystem, String);
+
     // Build reverse dependency graph (child -> parents)
-    let mut reverse_deps: HashMap<(String, Ecosystem), Vec<(String, Ecosystem)>> = HashMap::new();
+    let mut reverse_deps: HashMap<PackageNodeKey, Vec<PackageNodeKey>> = HashMap::new();
 
     for pkg in &lockfile.packages {
         for dep in &pkg.dependencies {
             reverse_deps
-                .entry((dep.name.clone(), pkg.ecosystem))
+                .entry((dep.name.clone(), pkg.ecosystem, dep.version.clone()))
                 .or_default()
-                .push((pkg.name.clone(), pkg.ecosystem));
+                .push((pkg.name.clone(), pkg.ecosystem, pkg.version.clone()));
         }
     }
 
@@ -1548,10 +1551,15 @@ pub fn why(package: &str) -> Result<()> {
     );
 
     for target_pkg in &target_packages {
-        let target_key = (target_pkg.name.clone(), target_pkg.ecosystem);
+        let target_key = (
+            target_pkg.name.clone(),
+            target_pkg.ecosystem,
+            target_pkg.version.clone(),
+        );
 
         // Check if it's a direct dependency
-        if target_pkg.direct || direct_deps.contains(&target_key) {
+        let direct_name_key = (target_pkg.name.clone(), target_pkg.ecosystem);
+        if target_pkg.direct || direct_deps.contains(&direct_name_key) {
             println!(
                 "  {} {}:{} @ {}",
                 "→".green(),
@@ -1568,8 +1576,8 @@ pub fn why(package: &str) -> Result<()> {
         }
 
         // BFS to find all paths from root to target
-        let mut paths: Vec<Vec<(String, Ecosystem)>> = Vec::new();
-        let mut queue: VecDeque<Vec<(String, Ecosystem)>> = VecDeque::new();
+        let mut paths: Vec<Vec<PackageNodeKey>> = Vec::new();
+        let mut queue: VecDeque<Vec<PackageNodeKey>> = VecDeque::new();
         queue.push_back(vec![target_key.clone()]);
 
         let max_paths = 5; // Limit paths to avoid explosion
@@ -1587,7 +1595,7 @@ pub fn why(package: &str) -> Result<()> {
             let current = path.last().unwrap();
 
             // Check if we reached a direct dependency
-            if direct_deps.contains(current) {
+            if direct_deps.contains(&(current.0.clone(), current.1)) {
                 paths.push(path.clone());
                 continue;
             }
@@ -1628,8 +1636,13 @@ pub fn why(package: &str) -> Result<()> {
                 let mut path_parts: Vec<String> = vec![manifest.package.name.bold().to_string()];
 
                 // Reverse path (it's from target to root)
-                for (name, eco) in path.iter().rev().skip(1) {
-                    path_parts.push(format!("{}:{}", eco.to_string().dimmed(), name.cyan()));
+                for (name, eco, version) in path.iter().rev().skip(1) {
+                    path_parts.push(format!(
+                        "{}:{}@{}",
+                        eco.to_string().dimmed(),
+                        name.cyan(),
+                        version
+                    ));
                 }
 
                 println!("    {}── {}", prefix, path_parts.join(" → "));
@@ -1690,7 +1703,7 @@ async fn outdated_async(offline: bool) -> Result<()> {
         let wanted = dep.version().unwrap_or("*").to_string();
         let current = lockfile
             .as_ref()
-            .and_then(|lf| lf.find_package(&name, eco))
+            .and_then(|lf| lf.find_direct_package(&name, eco))
             .map(|p| p.version.clone());
         deps_to_check.push((eco, name.to_string(), wanted, current));
     }

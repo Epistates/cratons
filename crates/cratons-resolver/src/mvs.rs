@@ -617,12 +617,33 @@ impl Resolver {
         // Start with locked versions
         let mut resolution = Resolution::new();
         let mut graph = DependencyGraph::new();
+        resolution.packages = lockfile
+            .packages
+            .iter()
+            .map(|pkg| ResolvedPackage {
+                name: pkg.name.clone(),
+                version: pkg.version.clone(),
+                ecosystem: pkg.ecosystem,
+                source: pkg.source.clone(),
+                integrity: pkg.integrity.clone(),
+                resolved_hash: pkg.resolved_hash.clone(),
+                direct: pkg.direct,
+                features: pkg.features.clone(),
+                dependencies: pkg
+                    .dependencies
+                    .iter()
+                    .map(|dep| (dep.name.clone(), dep.version.clone()))
+                    .collect(),
+            })
+            .collect();
 
         // Add locked packages
         for pkg in &lockfile.packages {
-            let _idx = graph.add_package(&pkg.name, pkg.ecosystem);
-            graph.set_versions(&pkg.name, pkg.ecosystem, vec![pkg.version.clone()]);
-            graph.set_resolved_version(&pkg.name, pkg.ecosystem, pkg.version.clone());
+            if graph.get_package(&pkg.name, pkg.ecosystem).is_none() {
+                let _idx = graph.add_package(&pkg.name, pkg.ecosystem);
+                graph.set_versions(&pkg.name, pkg.ecosystem, vec![pkg.version.clone()]);
+                graph.set_resolved_version(&pkg.name, pkg.ecosystem, pkg.version.clone());
+            }
         }
 
         // Check for new/updated dependencies in manifest
@@ -630,7 +651,7 @@ impl Resolver {
             let deps = manifest.dependencies.for_ecosystem(*ecosystem);
             for (name, _dep) in deps {
                 // If not in lockfile, resolve it
-                if lockfile.find_package(name, *ecosystem).is_none() {
+                if lockfile.find_direct_package(name, *ecosystem).is_none() {
                     // Would fetch and resolve new dependency
                     debug!("New dependency not in lockfile: {}", name);
                 }

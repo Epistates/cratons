@@ -219,9 +219,7 @@ pub fn verify_consistency(
             (*old_root, *old_root)
         } else {
             let seed = proof_iter.next().ok_or_else(|| {
-                CratonsError::Config(
-                    "tlog consistency proof: truncated (missing seed)".to_string(),
-                )
+                CratonsError::Config("tlog consistency proof: truncated (missing seed)".to_string())
             })?;
             (*seed, *seed)
         }
@@ -376,18 +374,19 @@ impl Checkpoint {
             CratonsError::Config("sum.golang.org checkpoint: missing tree_hash line".to_string())
         })?;
         let tree_size: u64 = size_str.trim().parse().map_err(|e| {
-            CratonsError::Config(format!("sum.golang.org checkpoint: invalid tree_size: {}", e))
-        })?;
-        let decoded = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            hash_str.trim(),
-        )
-        .map_err(|e| {
             CratonsError::Config(format!(
-                "sum.golang.org checkpoint: invalid base64 tree_hash: {}",
+                "sum.golang.org checkpoint: invalid tree_size: {}",
                 e
             ))
         })?;
+        let decoded =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, hash_str.trim())
+                .map_err(|e| {
+                    CratonsError::Config(format!(
+                        "sum.golang.org checkpoint: invalid base64 tree_hash: {}",
+                        e
+                    ))
+                })?;
         if decoded.len() != HASH_SIZE {
             return Err(CratonsError::Config(format!(
                 "sum.golang.org checkpoint: tree_hash must be {} bytes, got {}",
@@ -423,10 +422,7 @@ impl Checkpoint {
         let body = format!(
             "{}\n{}\n",
             self.tree_size,
-            base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                self.tree_hash
-            )
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, self.tree_hash)
         );
         let tmp = path.with_extension("checkpoint.tmp");
         std::fs::write(&tmp, body).map_err(|e| {
@@ -616,9 +612,7 @@ mod tests {
         let zero = [0u8; HASH_SIZE];
         verify_consistency(0, &zero, 100, &new_root, &[]).expect("empty->any must verify");
         // Non-empty proof must be rejected.
-        assert!(
-            verify_consistency(0, &zero, 100, &new_root, &[new_root]).is_err()
-        );
+        assert!(verify_consistency(0, &zero, 100, &new_root, &[new_root]).is_err());
     }
 
     #[test]
@@ -653,9 +647,7 @@ mod tests {
         cp.save_to(&path).expect("save");
         assert!(path.exists());
 
-        let loaded = Checkpoint::load_from(&path)
-            .expect("load")
-            .expect("Some");
+        let loaded = Checkpoint::load_from(&path).expect("load").expect("Some");
         assert_eq!(loaded, cp);
 
         // Loading from a path that doesn't exist yields None.

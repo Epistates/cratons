@@ -117,9 +117,9 @@ impl TrustedKey {
                 CratonsError::Config(format!("Invalid hex byte in key hash: {}", hex_str))
             })?;
         }
-        let decoded = B64.decode(parts[2]).map_err(|e| {
-            CratonsError::Config(format!("Invalid base64 in verifier key: {}", e))
-        })?;
+        let decoded = B64
+            .decode(parts[2])
+            .map_err(|e| CratonsError::Config(format!("Invalid base64 in verifier key: {}", e)))?;
         if decoded.len() != 33 {
             return Err(CratonsError::Config(format!(
                 "Verifier key body should be 33 bytes (alg+ed25519), got {}",
@@ -132,12 +132,11 @@ impl TrustedKey {
                 decoded[0]
             )));
         }
-        let key_bytes: [u8; 32] = decoded[1..].try_into().map_err(|_| {
-            CratonsError::Config("Ed25519 public key must be 32 bytes".to_string())
-        })?;
-        let verifier = VerifyingKey::from_bytes(&key_bytes).map_err(|e| {
-            CratonsError::Config(format!("Invalid Ed25519 public key: {}", e))
-        })?;
+        let key_bytes: [u8; 32] = decoded[1..]
+            .try_into()
+            .map_err(|_| CratonsError::Config("Ed25519 public key must be 32 bytes".to_string()))?;
+        let verifier = VerifyingKey::from_bytes(&key_bytes)
+            .map_err(|e| CratonsError::Config(format!("Invalid Ed25519 public key: {}", e)))?;
 
         // Sanity-check: recompute the key hash and verify it matches the
         // stored one. A mismatch indicates the vkey string was corrupted or
@@ -225,13 +224,9 @@ pub fn load_or_bootstrap_trust_root() -> Result<TrustedKey> {
 
 /// Return the canonical on-disk path for the sum.golang.org trust root cache.
 fn trust_root_cache_path() -> Result<PathBuf> {
-    let base = dirs::cache_dir().ok_or_else(|| {
-        CratonsError::Config("Cannot determine user cache directory".to_string())
-    })?;
-    Ok(base
-        .join("cratons")
-        .join("keys")
-        .join("sum.golang.org.pub"))
+    let base = dirs::cache_dir()
+        .ok_or_else(|| CratonsError::Config("Cannot determine user cache directory".to_string()))?;
+    Ok(base.join("cratons").join("keys").join("sum.golang.org.pub"))
 }
 
 /// Verify a signed note against a trusted verifier key.
@@ -423,11 +418,7 @@ pub fn enforce_weak_consistency(
 /// The first line is the module zip hash, the second is the `go.mod` hash.
 /// We return only the zip hash; the `go.mod` hash is used by `go mod tidy`
 /// but not by cratons (we re-download the `.mod` file separately).
-pub fn parse_verified_lookup(
-    body: &str,
-    module: &str,
-    version: &str,
-) -> Result<String> {
+pub fn parse_verified_lookup(body: &str, module: &str, version: &str) -> Result<String> {
     for line in body.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() != 3 {
@@ -465,9 +456,8 @@ pub fn parse_verified_lookup(
 /// The returned string is the base64 body, WITHOUT the `h1:` prefix.
 pub fn compute_h1(zip_bytes: &[u8]) -> Result<String> {
     let reader = Cursor::new(zip_bytes);
-    let mut archive = zip::ZipArchive::new(reader).map_err(|e| {
-        CratonsError::Config(format!("Invalid Go module zip: {}", e))
-    })?;
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|e| CratonsError::Config(format!("Invalid Go module zip: {}", e)))?;
 
     let mut lines: Vec<String> = Vec::with_capacity(archive.len());
     for i in 0..archive.len() {
@@ -480,10 +470,7 @@ pub fn compute_h1(zip_bytes: &[u8]) -> Result<String> {
         let name = entry
             .enclosed_name()
             .ok_or_else(|| {
-                CratonsError::Config(format!(
-                    "Zip entry has unsafe name: {}",
-                    entry.name()
-                ))
+                CratonsError::Config(format!("Zip entry has unsafe name: {}", entry.name()))
             })?
             .to_string_lossy()
             .to_string();

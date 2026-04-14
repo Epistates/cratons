@@ -79,10 +79,7 @@ impl GoProxyClient {
                 let url = format!("{}/latest", self.sum_db_url);
                 debug!("Fetching sum.golang.org /latest: {}", url);
                 let response = self.client.get(&url).send().await.map_err(|e| {
-                    CratonsError::Network(format!(
-                        "Failed to fetch sum.golang.org /latest: {}",
-                        e
-                    ))
+                    CratonsError::Network(format!("Failed to fetch sum.golang.org /latest: {}", e))
                 })?;
                 if !response.status().is_success() {
                     return Err(CratonsError::Registry {
@@ -148,19 +145,11 @@ impl GoProxyClient {
         if !response.status().is_success() {
             return Err(CratonsError::Registry {
                 registry: "sum.golang.org".to_string(),
-                message: format!(
-                    "HTTP {} for lookup {}@{}",
-                    response.status(),
-                    name,
-                    version
-                ),
+                message: format!("HTTP {} for lookup {}@{}", response.status(), name, version),
             });
         }
         let raw = response.text().await.map_err(|e| {
-            CratonsError::Network(format!(
-                "Failed to read sum.golang.org response: {}",
-                e
-            ))
+            CratonsError::Network(format!("Failed to read sum.golang.org response: {}", e))
         })?;
 
         let trust = self.trust_root().await?;

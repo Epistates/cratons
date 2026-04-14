@@ -73,8 +73,11 @@ impl Default for LockfileMetadata {
     }
 }
 
-/// Key for package index lookup.
-type PackageKey = (String, Ecosystem);
+/// Exact key for package index lookup.
+type PackageKey = (String, Ecosystem, String);
+
+/// Name-only key for ambiguous package lookups and grouping.
+type PackageNameKey = (String, Ecosystem);
 
 /// Cryptographic signature for lockfile integrity verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,7 +141,11 @@ pub struct Lockfile {
     /// critical for reproducible lockfile diffs in code review.
     /// Serialized as the `[pgp-trust]` TOML table. Empty maps are
     /// omitted from the serialized lockfile.
-    #[serde(default, rename = "pgp-trust", skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        rename = "pgp-trust",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub pgp_trust: BTreeMap<String, String>,
 
     /// Cryptographic signature over the lockfile content (for supply chain security).
@@ -146,10 +153,14 @@ pub struct Lockfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<LockfileSignature>,
 
-    /// Index for O(1) package lookups by (name, ecosystem)
+    /// Index for O(1) exact package lookups by (name, ecosystem, version)
     /// Rebuilt after deserialization.
     #[serde(skip)]
     package_index: HashMap<PackageKey, usize>,
+
+    /// Secondary index for lookups grouped by (name, ecosystem).
+    #[serde(skip)]
+    package_name_index: HashMap<PackageNameKey, Vec<usize>>,
 }
 
 fn default_version() -> u32 {
@@ -183,6 +194,7 @@ impl Lockfile {
             pgp_trust: BTreeMap::new(),
             signature: None,
             package_index: HashMap::new(),
+            package_name_index: HashMap::new(),
         }
     }
 
@@ -193,7 +205,11 @@ impl Lockfile {
     /// any existing entry — callers are expected to gate this behind a
     /// successful verification path, so overwrites are audit-visible
     /// in the lockfile diff.
-    pub fn record_pgp_trust(&mut self, group_id: impl Into<String>, fingerprint: impl Into<String>) {
+    pub fn record_pgp_trust(
+        &mut self,
+        group_id: impl Into<String>,
+        fingerprint: impl Into<String>,
+    ) {
         self.pgp_trust.insert(group_id.into(), fingerprint.into());
     }
 
@@ -209,9 +225,14 @@ impl Lockfile {
     /// Rebuild the package index for O(1) lookups.
     fn rebuild_index(&mut self) {
         self.package_index.clear();
+        self.package_name_index.clear();
         for (idx, pkg) in self.packages.iter().enumerate() {
             self.package_index
-                .insert((pkg.name.clone(), pkg.ecosystem), idx);
+                .insert((pkg.name.clone(), pkg.ecosystem, pkg.version.clone()), idx);
+            self.package_name_index
+                .entry((pkg.name.clone(), pkg.ecosystem))
+                .or_default()
+                .push(idx);
         }
     }
 
@@ -479,13 +500,68 @@ impl Lockfile {
         self.manifest_hash == *manifest_hash
     }
 
-    /// Find a locked package by name and ecosystem.
-    /// Uses O(1) HashMap lookup instead of linear scan.
+    /// Find an exact locked package by name, ecosystem, and version.
+    #[must_use]
+    pub fn find_package_exact(
+        &self,
+        name: &str,
+        ecosystem: Ecosystem,
+        version: &str,
+    ) -> Option<&LockedPackage> {
+        self.package_index
+            .get(&(name.to_string(), ecosystem, version.to_string()))
+            .and_then(|&idx| self.packages.get(idx))
+    }
+
+    /// Find a direct dependency package by name and ecosystem.
+    #[must_use]
+    pub fn find_direct_package(&self, name: &str, ecosystem: Ecosystem) -> Option<&LockedPackage> {
+        let mut direct_matches = self
+            .packages_by_name(name, ecosystem)
+            .filter(|pkg| pkg.direct);
+        let direct_match = direct_matches.next()?;
+        if direct_matches.next().is_none() {
+            Some(direct_match)
+        } else {
+            None
+        }
+    }
+
+    /// Find a locked package by name and ecosystem when the match is unambiguous.
+    ///
+    /// If multiple versions exist, this prefers the unique direct dependency.
     #[must_use]
     pub fn find_package(&self, name: &str, ecosystem: Ecosystem) -> Option<&LockedPackage> {
-        self.package_index
+        let indices = self
+            .package_name_index
+            .get(&(name.to_string(), ecosystem))?;
+        if indices.len() == 1 {
+            return self.packages.get(indices[0]);
+        }
+
+        let mut direct_matches = indices
+            .iter()
+            .filter_map(|&idx| self.packages.get(idx))
+            .filter(|pkg| pkg.direct);
+
+        let direct_match = direct_matches.next()?;
+        if direct_matches.next().is_none() {
+            Some(direct_match)
+        } else {
+            None
+        }
+    }
+
+    /// Iterate over all locked packages with the given name and ecosystem.
+    pub fn packages_by_name(
+        &self,
+        name: &str,
+        ecosystem: Ecosystem,
+    ) -> impl Iterator<Item = &LockedPackage> {
+        self.package_name_index
             .get(&(name.to_string(), ecosystem))
-            .and_then(|&idx| self.packages.get(idx))
+            .into_iter()
+            .flat_map(|indices| indices.iter().filter_map(|&idx| self.packages.get(idx)))
     }
 
     /// Get all packages for an ecosystem.
@@ -504,18 +580,24 @@ impl Lockfile {
     }
 
     /// Add a locked package.
-    /// Maintains the O(1) lookup index.
+    /// Maintains the exact and grouped lookup indexes.
     pub fn add_package(&mut self, package: LockedPackage) {
-        let key = (package.name.clone(), package.ecosystem);
+        let exact_key = (
+            package.name.clone(),
+            package.ecosystem,
+            package.version.clone(),
+        );
 
-        // Check if package already exists
-        if let Some(&existing_idx) = self.package_index.get(&key) {
+        if let Some(&existing_idx) = self.package_index.get(&exact_key) {
             // Update existing package in place
             self.packages[existing_idx] = package;
         } else {
-            // Add new package
             let new_idx = self.packages.len();
-            self.package_index.insert(key, new_idx);
+            self.package_index.insert(exact_key, new_idx);
+            self.package_name_index
+                .entry((package.name.clone(), package.ecosystem))
+                .or_default()
+                .push(new_idx);
             self.packages.push(package);
         }
     }
@@ -955,6 +1037,11 @@ mod tests {
         let found = lockfile.find_package("lodash", Ecosystem::Npm);
         assert!(found.is_some());
         assert_eq!(found.unwrap().version, "4.17.21");
+        assert!(
+            lockfile
+                .find_package_exact("lodash", Ecosystem::Npm, "4.17.21")
+                .is_some()
+        );
 
         let not_found = lockfile.find_package("lodash", Ecosystem::PyPi);
         assert!(not_found.is_none());
@@ -1175,13 +1262,13 @@ mod tests {
     }
 
     #[test]
-    fn test_add_package_replaces_existing() {
+    fn test_add_package_replaces_exact_duplicate() {
         let manifest_hash = ContentHash::blake3("test".to_string());
         let mut lockfile = Lockfile::new(manifest_hash);
 
         lockfile.add_package(LockedPackage {
             name: "lodash".to_string(),
-            version: "4.17.20".to_string(),
+            version: "4.17.21".to_string(),
             ecosystem: Ecosystem::Npm,
             source: "npm".to_string(),
             integrity: "sha256-old".to_string(),
@@ -1191,7 +1278,7 @@ mod tests {
             dependencies: vec![],
         });
 
-        // Add same package with different version
+        // Add the exact same package again with updated metadata
         lockfile.add_package(LockedPackage {
             name: "lodash".to_string(),
             version: "4.17.21".to_string(),
@@ -1206,6 +1293,55 @@ mod tests {
 
         assert_eq!(lockfile.package_count(), 1);
         assert_eq!(lockfile.packages[0].version, "4.17.21");
+        assert_eq!(lockfile.packages[0].integrity, "sha256-new");
+    }
+
+    #[test]
+    fn test_add_package_preserves_parallel_versions() {
+        let manifest_hash = ContentHash::blake3("parallel".to_string());
+        let mut lockfile = Lockfile::new(manifest_hash);
+
+        lockfile.add_package(LockedPackage {
+            name: "lodash".to_string(),
+            version: "4.17.20".to_string(),
+            ecosystem: Ecosystem::Npm,
+            source: "npm".to_string(),
+            integrity: "sha256-old".to_string(),
+            resolved_hash: ContentHash::blake3("old".to_string()),
+            direct: false,
+            features: vec![],
+            dependencies: vec![],
+        });
+        lockfile.add_package(LockedPackage {
+            name: "lodash".to_string(),
+            version: "4.17.21".to_string(),
+            ecosystem: Ecosystem::Npm,
+            source: "npm".to_string(),
+            integrity: "sha256-new".to_string(),
+            resolved_hash: ContentHash::blake3("new".to_string()),
+            direct: true,
+            features: vec![],
+            dependencies: vec![],
+        });
+
+        assert_eq!(lockfile.package_count(), 2);
+        assert!(
+            lockfile
+                .find_package_exact("lodash", Ecosystem::Npm, "4.17.20")
+                .is_some()
+        );
+        assert!(
+            lockfile
+                .find_package_exact("lodash", Ecosystem::Npm, "4.17.21")
+                .is_some()
+        );
+        assert_eq!(
+            lockfile
+                .find_direct_package("lodash", Ecosystem::Npm)
+                .unwrap()
+                .version,
+            "4.17.21"
+        );
     }
 
     #[test]

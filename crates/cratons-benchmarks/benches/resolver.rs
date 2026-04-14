@@ -16,7 +16,7 @@ use std::hint::black_box;
 fn bench_graph_construction(c: &mut Criterion) {
     let mut group = c.benchmark_group("graph_construction");
 
-    for size in [10, 50, 100, 500, 1000].iter() {
+    for size in &[10, 50, 100, 500, 1000] {
         group.throughput(Throughput::Elements(*size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
             b.iter(|| {
@@ -62,7 +62,7 @@ fn bench_version_matching(c: &mut Criterion) {
 fn bench_version_selection(c: &mut Criterion) {
     let mut group = c.benchmark_group("version_selection");
 
-    for count in [10, 50, 100, 500, 1000].iter() {
+    for count in &[10, 50, 100, 500, 1000] {
         group.throughput(Throughput::Elements(*count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             let versions = create_version_map("test-pkg", count);
@@ -136,7 +136,7 @@ fn bench_mvs_large_tree(c: &mut Criterion) {
 fn bench_graph_traversal(c: &mut Criterion) {
     let mut group = c.benchmark_group("graph_traversal");
 
-    for size in [10, 50, 100].iter() {
+    for size in &[10, 50, 100] {
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
             let mut graph = DependencyGraph::new();
             graph.add_package("root", Ecosystem::Npm);
@@ -242,7 +242,7 @@ fn bench_conflict_detection(c: &mut Criterion) {
 fn bench_transitive_resolution(c: &mut Criterion) {
     let mut group = c.benchmark_group("transitive_resolution");
 
-    for depth in [3, 5, 8].iter() {
+    for depth in &[3, 5, 8] {
         group.bench_with_input(BenchmarkId::from_parameter(depth), depth, |b, &depth| {
             // Create a chain of dependencies
             let mut graph = DependencyGraph::new();

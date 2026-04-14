@@ -1,5 +1,6 @@
 //! Workspace CLI integration tests.
 
+use console::strip_ansi_codes;
 use std::fs;
 use std::process::Command;
 use tempfile::TempDir;
@@ -115,8 +116,8 @@ build = "echo building pkg-a"
         .output()
         .expect("Failed to execute cratons build");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = strip_ansi_codes(&String::from_utf8_lossy(&output.stdout)).into_owned();
+    let stderr = strip_ansi_codes(&String::from_utf8_lossy(&output.stderr)).into_owned();
 
     // It might fail if store/builder dependencies aren't perfect in test env,
     // but we check if it ATTEMPTED to build pkg-a.

@@ -252,7 +252,7 @@ fn bench_get_file(c: &mut Criterion) {
 fn bench_cas_concurrent_inserts(c: &mut Criterion) {
     let mut group = c.benchmark_group("cas_concurrent_inserts");
 
-    for count in [10, 50, 100].iter() {
+    for count in &[10, 50, 100] {
         group.throughput(Throughput::Elements(*count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             b.iter_batched(
@@ -281,7 +281,7 @@ fn bench_cas_concurrent_inserts(c: &mut Criterion) {
 fn bench_cas_deduplication(c: &mut Criterion) {
     let mut group = c.benchmark_group("cas_deduplication");
 
-    for size in [FileSizes::SMALL, FileSizes::MEDIUM, FileSizes::LARGE].iter() {
+    for size in &[FileSizes::SMALL, FileSizes::MEDIUM, FileSizes::LARGE] {
         group.throughput(Throughput::Bytes(*size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
             let content = generate_random_content(size);
@@ -307,7 +307,7 @@ fn bench_cas_deduplication(c: &mut Criterion) {
 fn bench_cas_iteration(c: &mut Criterion) {
     let mut group = c.benchmark_group("cas_iteration");
 
-    for count in [10, 50, 100].iter() {
+    for count in &[10, 50, 100] {
         group.throughput(Throughput::Elements(*count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             let (_temp_dir, cas) = setup_temp_cas();

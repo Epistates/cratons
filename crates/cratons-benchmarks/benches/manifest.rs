@@ -13,8 +13,8 @@ use cratons_benchmarks::{
 use cratons_core::Ecosystem;
 use cratons_manifest::{Dependencies, Dependency, Manifest};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use std::hint::black_box;
 use std::fs;
+use std::hint::black_box;
 use tempfile::NamedTempFile;
 
 /// Benchmark parsing a small manifest.
@@ -57,7 +57,7 @@ fn bench_parse_large_manifest(c: &mut Criterion) {
 fn bench_parse_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse_scaling");
 
-    for count in [5, 10, 50, 100, 250, 500].iter() {
+    for count in &[5, 10, 50, 100, 250, 500] {
         group.throughput(Throughput::Elements(*count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             let toml_content = generate_manifest_toml(count);
@@ -111,7 +111,7 @@ fn bench_serialize_large_manifest(c: &mut Criterion) {
 fn bench_serialize_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("serialize_scaling");
 
-    for count in [10, 50, 100, 250, 500].iter() {
+    for count in &[10, 50, 100, 250, 500] {
         group.throughput(Throughput::Elements(*count as u64));
         let manifest = cratons_benchmarks::generate_manifest_with_deps(*count);
 
@@ -130,7 +130,7 @@ fn bench_serialize_scaling(c: &mut Criterion) {
 fn bench_load_from_file(c: &mut Criterion) {
     let mut group = c.benchmark_group("load_from_file");
 
-    for count in [10, 50, 100].iter() {
+    for count in &[10, 50, 100] {
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             let toml_content = generate_manifest_toml(count);
             let temp_file = NamedTempFile::new().unwrap();
@@ -225,7 +225,7 @@ fn bench_create_manifest(c: &mut Criterion) {
 fn bench_add_dependencies(c: &mut Criterion) {
     let mut group = c.benchmark_group("add_dependencies");
 
-    for count in [10, 50, 100].iter() {
+    for count in &[10, 50, 100] {
         group.throughput(Throughput::Elements(*count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             b.iter(|| {
@@ -290,7 +290,7 @@ fn bench_validate_manifest(c: &mut Criterion) {
 fn bench_roundtrip(c: &mut Criterion) {
     let mut group = c.benchmark_group("roundtrip");
 
-    for count in [10, 50, 100].iter() {
+    for count in &[10, 50, 100] {
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             let toml_content = generate_manifest_toml(count);
 

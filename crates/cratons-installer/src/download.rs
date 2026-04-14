@@ -87,10 +87,7 @@ impl PackageDownloader {
     /// handle shares the Arc'd HTTP client, maven_trust, and maven
     /// keystore with the parent downloader but carries its own
     /// `pgp_trust_snapshot`.
-    pub(crate) fn with_lockfile_trust(
-        &self,
-        snapshot: Arc<BTreeMap<String, String>>,
-    ) -> Self {
+    pub(crate) fn with_lockfile_trust(&self, snapshot: Arc<BTreeMap<String, String>>) -> Self {
         Self {
             client: self.client.clone(),
             concurrency: self.concurrency,
@@ -125,10 +122,7 @@ impl PackageDownloader {
     ) -> Result<Option<(String, String)>> {
         // Parse groupId out of the Maven coordinate (format: `groupId:artifactId`).
         let group_id = pkg.name.split(':').next().ok_or_else(|| {
-            CratonsError::Config(format!(
-                "Maven package name missing groupId: {}",
-                pkg.name
-            ))
+            CratonsError::Config(format!("Maven package name missing groupId: {}", pkg.name))
         })?;
 
         // Fetch the detached signature over the network from the same
@@ -137,10 +131,7 @@ impl PackageDownloader {
         // suspicious, and we refuse to install without one.
         let asc_url = format!("{}.asc", pkg.source);
         let asc_response = self.client.get(&asc_url).send().await.map_err(|e| {
-            CratonsError::Network(format!(
-                "Failed to fetch PGP signature {}: {}",
-                asc_url, e
-            ))
+            CratonsError::Network(format!("Failed to fetch PGP signature {}: {}", asc_url, e))
         })?;
         if !asc_response.status().is_success() {
             return Err(CratonsError::Network(format!(
@@ -149,9 +140,10 @@ impl PackageDownloader {
                 asc_response.status()
             )));
         }
-        let asc_armor = asc_response.text().await.map_err(|e| {
-            CratonsError::Network(format!("Failed to read .asc body: {}", e))
-        })?;
+        let asc_armor = asc_response
+            .text()
+            .await
+            .map_err(|e| CratonsError::Network(format!("Failed to read .asc body: {}", e)))?;
 
         // ------------------------------------------------------------
         // Trust ladder: project/user keyring → lockfile TOFU → policy
@@ -269,13 +261,12 @@ impl PackageDownloader {
     ) -> Result<String> {
         use pgp::composed::{Deserializable, DetachedSignature};
 
-        let (detached, _headers) =
-            DetachedSignature::from_string(asc_armor).map_err(|e| {
-                CratonsError::Config(format!(
-                    "Failed to parse detached PGP signature for {}: {}",
-                    pkg.name, e
-                ))
-            })?;
+        let (detached, _headers) = DetachedSignature::from_string(asc_armor).map_err(|e| {
+            CratonsError::Config(format!(
+                "Failed to parse detached PGP signature for {}: {}",
+                pkg.name, e
+            ))
+        })?;
 
         // Prefer the issuer fingerprint subpacket (RFC 4880bis, v4+).
         // Reject signatures that only carry a long key ID — 64 bits is
@@ -289,8 +280,7 @@ impl PackageDownloader {
                 pkg.name
             )));
         };
-        let fp_hex =
-            cratons_security::normalize_fingerprint(&hex::encode_upper(fp.as_bytes()))?;
+        let fp_hex = cratons_security::normalize_fingerprint(&hex::encode_upper(fp.as_bytes()))?;
 
         let keystore = self.keystore().await?;
         let key_armor = keystore.fetch_key(&fp_hex).await?;
@@ -326,11 +316,7 @@ impl PackageDownloader {
     /// vulnerabilities. The integrity verification and content-addressed storage both
     /// operate on the same in-memory bytes, eliminating any window where the content
     /// could be swapped by an attacker.
-    pub async fn download(
-        &self,
-        pkg: &LockedPackage,
-        store: &Store,
-    ) -> Result<DownloadResult> {
+    pub async fn download(&self, pkg: &LockedPackage, store: &Store) -> Result<DownloadResult> {
         debug!(
             "Downloading {}@{} from {}",
             pkg.name, pkg.version, pkg.source
@@ -544,8 +530,7 @@ impl PackageDownloader {
         // the signed hash.
         if let Some(expected_hash) = pkg.integrity.strip_prefix("h1-") {
             let actual_h1 = cratons_resolver::registry::gosum::compute_h1(bytes)?;
-            if !cratons_core::constant_time_eq(actual_h1.as_bytes(), expected_hash.as_bytes())
-            {
+            if !cratons_core::constant_time_eq(actual_h1.as_bytes(), expected_hash.as_bytes()) {
                 return Err(CratonsError::ChecksumMismatch {
                     package: pkg.name.clone(),
                     expected: expected_hash.to_string(),
@@ -661,16 +646,17 @@ mod tests {
                 let mut zw = zip::ZipWriter::new(cursor);
                 let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
                     .compression_method(zip::CompressionMethod::Stored);
-                zw.start_file("example.com/mod@v0.1.0/go.mod", opts).unwrap();
-                zw.write_all(b"module example.com/mod\n\ngo 1.22\n").unwrap();
+                zw.start_file("example.com/mod@v0.1.0/go.mod", opts)
+                    .unwrap();
+                zw.write_all(b"module example.com/mod\n\ngo 1.22\n")
+                    .unwrap();
                 zw.finish().unwrap();
             }
             buf
         };
 
         // Compute the expected h1 ourselves and stuff it into a LockedPackage.
-        let expected_h1 =
-            cratons_resolver::registry::gosum::compute_h1(&zip_bytes).unwrap();
+        let expected_h1 = cratons_resolver::registry::gosum::compute_h1(&zip_bytes).unwrap();
         let pkg = LockedPackage {
             name: "example.com/mod".to_string(),
             version: "v0.1.0".to_string(),
@@ -700,7 +686,8 @@ mod tests {
                 let mut zw = zip::ZipWriter::new(cursor);
                 let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
                     .compression_method(zip::CompressionMethod::Stored);
-                zw.start_file("example.com/mod@v0.1.0/go.mod", opts).unwrap();
+                zw.start_file("example.com/mod@v0.1.0/go.mod", opts)
+                    .unwrap();
                 zw.write_all(b"module example.com/mod\n").unwrap();
                 zw.finish().unwrap();
             }
@@ -722,9 +709,6 @@ mod tests {
 
         let downloader = PackageDownloader::new(reqwest::Client::new(), 1);
         let result = downloader.verify_download_integrity(&pkg, &zip_bytes);
-        assert!(matches!(
-            result,
-            Err(CratonsError::ChecksumMismatch { .. })
-        ));
+        assert!(matches!(result, Err(CratonsError::ChecksumMismatch { .. })));
     }
 }

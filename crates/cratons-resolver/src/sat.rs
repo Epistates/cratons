@@ -274,9 +274,9 @@ impl DependencyProvider for SatDependencyProvider {
                 let range = parse_range(*ecosystem, req);
                 entries.push((dep_pkg, range));
             }
-            return Ok(Dependencies::Available(
-                DependencyConstraints::from_iter(entries),
-            ));
+            return Ok(Dependencies::Available(DependencyConstraints::from_iter(
+                entries,
+            )));
         }
 
         // Fetch metadata
@@ -328,9 +328,9 @@ impl DependencyProvider for SatDependencyProvider {
             // Optional peer deps are NOT added as constraints
         }
 
-        Ok(Dependencies::Available(
-            DependencyConstraints::from_iter(entries),
-        ))
+        Ok(Dependencies::Available(DependencyConstraints::from_iter(
+            entries,
+        )))
     }
 }
 

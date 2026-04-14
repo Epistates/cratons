@@ -55,7 +55,7 @@ fn bench_parse_large_lockfile(c: &mut Criterion) {
 fn bench_parse_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse_scaling");
 
-    for count in [10, 50, 100, 250, 500, 1000].iter() {
+    for count in &[10, 50, 100, 250, 500, 1000] {
         group.throughput(Throughput::Elements(*count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             let toml_content = generate_lockfile_toml(count);
@@ -109,7 +109,7 @@ fn bench_serialize_large_lockfile(c: &mut Criterion) {
 fn bench_serialize_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("serialize_scaling");
 
-    for count in [10, 50, 100, 250, 500, 1000].iter() {
+    for count in &[10, 50, 100, 250, 500, 1000] {
         group.throughput(Throughput::Elements(*count as u64));
         let lockfile = generate_lockfile(*count);
 
@@ -128,7 +128,7 @@ fn bench_serialize_scaling(c: &mut Criterion) {
 fn bench_load_from_file(c: &mut Criterion) {
     let mut group = c.benchmark_group("load_from_file");
 
-    for count in [10, 50, 100, 250].iter() {
+    for count in &[10, 50, 100, 250] {
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             let toml_content = generate_lockfile_toml(count);
             let temp_file = NamedTempFile::new().unwrap();
@@ -148,7 +148,7 @@ fn bench_load_from_file(c: &mut Criterion) {
 fn bench_save_to_file(c: &mut Criterion) {
     let mut group = c.benchmark_group("save_to_file");
 
-    for count in [10, 50, 100].iter() {
+    for count in &[10, 50, 100] {
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             let lockfile = generate_lockfile(count);
 
@@ -169,7 +169,7 @@ fn bench_save_to_file(c: &mut Criterion) {
 fn bench_find_package(c: &mut Criterion) {
     let mut group = c.benchmark_group("find_package");
 
-    for count in [50, 100, 500, 1000].iter() {
+    for count in &[50, 100, 500, 1000] {
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             let lockfile = generate_lockfile(count);
             let search_idx = count / 2;
@@ -210,7 +210,7 @@ fn bench_packages_for_ecosystem(c: &mut Criterion) {
 fn bench_direct_packages(c: &mut Criterion) {
     let mut group = c.benchmark_group("direct_packages");
 
-    for count in [50, 100, 500].iter() {
+    for count in &[50, 100, 500] {
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             let lockfile = generate_lockfile(count);
 
@@ -253,7 +253,7 @@ fn bench_is_fresh(c: &mut Criterion) {
 fn bench_add_package(c: &mut Criterion) {
     let mut group = c.benchmark_group("add_package");
 
-    for count in [10, 50, 100].iter() {
+    for count in &[10, 50, 100] {
         group.throughput(Throughput::Elements(*count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             b.iter(|| {
@@ -326,7 +326,7 @@ fn bench_artifact_cache(c: &mut Criterion) {
 fn bench_package_count(c: &mut Criterion) {
     let mut group = c.benchmark_group("package_count");
 
-    for count in [50, 100, 500, 1000].iter() {
+    for count in &[50, 100, 500, 1000] {
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             let lockfile = generate_lockfile(count);
 
@@ -344,7 +344,7 @@ fn bench_package_count(c: &mut Criterion) {
 fn bench_iterate_packages(c: &mut Criterion) {
     let mut group = c.benchmark_group("iterate_packages");
 
-    for count in [50, 100, 500].iter() {
+    for count in &[50, 100, 500] {
         group.throughput(Throughput::Elements(*count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             let lockfile = generate_lockfile(count);
@@ -388,7 +388,7 @@ fn bench_parse_integrity(c: &mut Criterion) {
 fn bench_dependency_ref(c: &mut Criterion) {
     let mut group = c.benchmark_group("dependency_ref");
 
-    for count in [10, 50, 100].iter() {
+    for count in &[10, 50, 100] {
         group.throughput(Throughput::Elements(*count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             b.iter(|| {
@@ -411,7 +411,7 @@ fn bench_dependency_ref(c: &mut Criterion) {
 fn bench_roundtrip(c: &mut Criterion) {
     let mut group = c.benchmark_group("roundtrip");
 
-    for count in [10, 50, 100].iter() {
+    for count in &[10, 50, 100] {
         group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
             let toml_content = generate_lockfile_toml(count);
 
