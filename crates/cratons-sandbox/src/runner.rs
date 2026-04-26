@@ -276,6 +276,39 @@ pub fn validate_config(config: &SandboxConfig) -> Result<(), SandboxError> {
     Ok(())
 }
 
+/// Verify that an isolation level satisfies the caller's hard policy.
+///
+/// Backends call this at the start of `execute()` so callers who set
+/// `SandboxPolicy::require_*` see `SandboxError::Unsupported` instead of a
+/// silent capability downgrade. The previous design relied on callers to
+/// inspect `IsolationLevel::has_filesystem_isolation()` themselves, which
+/// in practice nobody does.
+pub fn enforce_policy(
+    config: &SandboxConfig,
+    actual: crate::IsolationLevel,
+) -> Result<(), SandboxError> {
+    let p = &config.policy;
+    if p.require_filesystem_isolation && !actual.has_filesystem_isolation() {
+        return Err(SandboxError::Unsupported(format!(
+            "Caller requires filesystem isolation but {actual:?} cannot enforce it. \
+             On macOS, sandbox-exec only restricts writes; reads remain visible. \
+             Use a Linux container, a VM (Apple Virtualization / QEMU), or relax \
+             SandboxPolicy::require_filesystem_isolation."
+        )));
+    }
+    if p.require_network_isolation && !actual.has_network_isolation() {
+        return Err(SandboxError::Unsupported(format!(
+            "Caller requires network isolation but {actual:?} cannot enforce it"
+        )));
+    }
+    if p.require_resource_limits && !actual.has_resource_limits() {
+        return Err(SandboxError::Unsupported(format!(
+            "Caller requires resource limits but {actual:?} cannot enforce them"
+        )));
+    }
+    Ok(())
+}
+
 /// Log warnings about unsupported features.
 pub fn log_unsupported_features(config: &SandboxConfig, sandbox_name: &str) {
     use crate::config::NetworkAccess;

@@ -17,7 +17,7 @@ use cratons_core::{CratonsError, Result};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Hard upper bound on the total extracted bytes from a single archive.
 ///
@@ -389,14 +389,20 @@ pub fn safe_unpack_tar_with_strip<R: Read>(
             entry_path.to_path_buf()
         };
 
-        // Validate the path
-        let sanitized_path = match validate_extract_path(dest, &stripped_path) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("Skipping potentially malicious archive entry: {}", e);
-                continue;
-            }
-        };
+        // SECURITY: Fail-closed on path validation. A malformed entry —
+        // whether a real attack or a corrupt archive — aborts the whole
+        // extraction rather than producing a partial result with silently
+        // dropped entries. Warn-and-continue lets a single planted entry
+        // sit alongside a benign tarball and still ship the rest.
+        let sanitized_path = validate_extract_path(dest, &stripped_path).map_err(|e| {
+            CratonsError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Refusing to extract tar entry '{}': {e}",
+                    entry_path.display()
+                ),
+            ))
+        })?;
 
         let full_path = dest.join(&sanitized_path);
 
@@ -432,28 +438,35 @@ pub fn safe_unpack_tar_with_strip<R: Read>(
                 let target = match entry.link_name() {
                     Ok(Some(target)) => target.into_owned(),
                     Ok(None) => {
-                        warn!("Skipping symlink without target: {}", entry_path.display());
-                        continue;
+                        return Err(CratonsError::Io(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "Refusing to extract tar symlink '{}': missing target",
+                                entry_path.display()
+                            ),
+                        )));
                     }
                     Err(err) => {
-                        warn!(
-                            "Skipping symlink with unreadable target {}: {}",
-                            entry_path.display(),
-                            err
-                        );
-                        continue;
+                        return Err(CratonsError::Io(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "Refusing to extract tar symlink '{}': {err}",
+                                entry_path.display()
+                            ),
+                        )));
                     }
                 };
 
-                if let Err(err) = validate_symlink_target(&target, &sanitized_path) {
-                    warn!(
-                        "Skipping potentially malicious symlink {} -> {}: {}",
-                        entry_path.display(),
-                        target.display(),
-                        err
-                    );
-                    continue;
-                }
+                validate_symlink_target(&target, &sanitized_path).map_err(|e| {
+                    CratonsError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Refusing to extract tar symlink '{}' -> '{}': {e}",
+                            entry_path.display(),
+                            target.display()
+                        ),
+                    ))
+                })?;
 
                 if let Some(parent) = full_path.parent() {
                     fs::create_dir_all(parent)?;
@@ -476,34 +489,37 @@ pub fn safe_unpack_tar_with_strip<R: Read>(
                 let target = match entry.link_name() {
                     Ok(Some(target)) => target.into_owned(),
                     Ok(None) => {
-                        warn!(
-                            "Skipping hard link without target: {}",
-                            entry_path.display()
-                        );
-                        continue;
+                        return Err(CratonsError::Io(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "Refusing to extract hard link '{}': missing target",
+                                entry_path.display()
+                            ),
+                        )));
                     }
                     Err(err) => {
-                        warn!(
-                            "Skipping hard link with unreadable target {}: {}",
-                            entry_path.display(),
-                            err
-                        );
-                        continue;
+                        return Err(CratonsError::Io(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "Refusing to extract hard link '{}': {err}",
+                                entry_path.display()
+                            ),
+                        )));
                     }
                 };
 
-                let source = match validate_hard_link_target(dest, &target, &sanitized_path) {
-                    Ok(source) => source,
-                    Err(err) => {
-                        warn!(
-                            "Skipping potentially malicious hard link {} -> {}: {}",
-                            entry_path.display(),
-                            target.display(),
-                            err
-                        );
-                        continue;
-                    }
-                };
+                let source = validate_hard_link_target(dest, &target, &sanitized_path).map_err(
+                    |e| {
+                        CratonsError::Io(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "Refusing to extract hard link '{}' -> '{}': {e}",
+                                entry_path.display(),
+                                target.display()
+                            ),
+                        ))
+                    },
+                )?;
 
                 if let Some(parent) = full_path.parent() {
                     fs::create_dir_all(parent)?;
@@ -553,11 +569,20 @@ pub fn safe_extract_zip_with_strip(
             CratonsError::Io(io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
         })?;
 
+        // Fail-closed: an entry whose name escapes the zip's logical layout
+        // (absolute path, embedded NUL, or path-traversal sequences) is treated
+        // as a hostile archive rather than a benign quirk. See the tar branch
+        // above for the same rationale.
         let entry_path = match file.enclosed_name() {
             Some(p) => p.to_path_buf(),
             None => {
-                warn!("Skipping zip entry with invalid name");
-                continue;
+                return Err(CratonsError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Refusing to extract zip entry with unsafe name: '{}'",
+                        file.name()
+                    ),
+                )));
             }
         };
 
@@ -573,14 +598,15 @@ pub fn safe_extract_zip_with_strip(
             entry_path.clone()
         };
 
-        // Validate the path
-        let sanitized_path = match validate_extract_path(dest, &stripped_path) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("Skipping potentially malicious zip entry: {}", e);
-                continue;
-            }
-        };
+        let sanitized_path = validate_extract_path(dest, &stripped_path).map_err(|e| {
+            CratonsError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Refusing to extract zip entry '{}': {e}",
+                    entry_path.display()
+                ),
+            ))
+        })?;
 
         let full_path = dest.join(&sanitized_path);
 
@@ -761,8 +787,12 @@ mod tests {
 
         let tar_data = builder.into_inner().unwrap();
         let mut archive = tar::Archive::new(&tar_data[..]);
-        safe_unpack_tar(&mut archive, &dest).unwrap();
-
+        let err = safe_unpack_tar(&mut archive, &dest)
+            .expect_err("absolute symlink target must abort extraction");
+        assert!(
+            err.to_string().contains("Refusing to extract"),
+            "expected fail-closed error, got {err}"
+        );
         assert!(dest.join("pkg/link").symlink_metadata().is_err());
     }
 
@@ -792,9 +822,12 @@ mod tests {
 
         let tar_data = builder.into_inner().unwrap();
         let mut archive = tar::Archive::new(&tar_data[..]);
-        safe_unpack_tar(&mut archive, &dest).unwrap();
-
-        assert!(dest.join("pkg/hello.txt").exists());
+        let err = safe_unpack_tar(&mut archive, &dest)
+            .expect_err("absolute hard link target must abort extraction");
+        assert!(
+            err.to_string().contains("Refusing to extract"),
+            "expected fail-closed error, got {err}"
+        );
         assert!(!dest.join("pkg/escape.txt").exists());
     }
 

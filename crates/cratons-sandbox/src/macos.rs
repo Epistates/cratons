@@ -36,7 +36,7 @@ use tracing::{debug, warn};
 use crate::config::{NetworkAccess, SandboxConfig};
 use crate::error::SandboxError;
 use crate::result::SandboxResult;
-use crate::runner::{DEFAULT_PATH, validate_config};
+use crate::runner::{DEFAULT_PATH, enforce_policy, validate_config};
 use crate::{IsolationLevel, Sandbox};
 
 /// Binaries that are always allowed to execute in the sandbox.
@@ -485,6 +485,7 @@ impl Default for MacOsSandbox {
 impl Sandbox for MacOsSandbox {
     async fn execute(&self, config: &SandboxConfig) -> Result<SandboxResult, SandboxError> {
         validate_config(config)?;
+        enforce_policy(config, IsolationLevel::OsSandbox)?;
 
         if !Self::is_available() {
             return Err(SandboxError::NotAvailable(

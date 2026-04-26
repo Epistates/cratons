@@ -45,6 +45,7 @@ impl Default for ProcessSandbox {
 impl Sandbox for ProcessSandbox {
     async fn execute(&self, config: &SandboxConfig) -> Result<SandboxResult, SandboxError> {
         validate_config(config)?;
+        crate::runner::enforce_policy(config, IsolationLevel::Process)?;
 
         // Use rusage for resource tracking on Unix
         #[cfg(unix)]

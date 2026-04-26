@@ -372,10 +372,15 @@ impl AuditResult {
 // ============================================================================
 
 /// Cached OSV vulnerability entry.
+///
+/// Stores fully-converted `Vulnerability` records (not raw OSV IDs) so a
+/// cache hit lets the auditor skip the network round-trip entirely. The
+/// previous design stored only IDs, which still required a follow-up fetch
+/// to populate severity/range fields and so provided no real cache benefit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedVulns {
-    /// Vulnerabilities for this package version.
-    vulns: Vec<String>, // Vulnerability IDs
+    /// Vulnerabilities for this package version (already converted).
+    vulns: Vec<Vulnerability>,
     /// When this cache entry was created.
     #[serde(with = "humantime_serde")]
     cached_at: SystemTime,
@@ -427,7 +432,7 @@ impl OsvCache {
     }
 
     /// Get cached vulnerabilities if fresh.
-    pub fn get(&self, ecosystem: &str, name: &str, version: &str) -> Option<Vec<String>> {
+    pub fn get(&self, ecosystem: &str, name: &str, version: &str) -> Option<Vec<Vulnerability>> {
         let key = Self::cache_key(ecosystem, name, version);
         let path = self.cache_dir.join(&key);
 
@@ -473,19 +478,19 @@ impl OsvCache {
     }
 
     /// Store vulnerabilities in cache.
-    pub fn set(&self, ecosystem: &str, name: &str, version: &str, vuln_ids: Vec<String>) {
+    pub fn set(&self, ecosystem: &str, name: &str, version: &str, vulns: Vec<Vulnerability>) {
         let key = Self::cache_key(ecosystem, name, version);
         let path = self.cache_dir.join(&key);
 
         let cached = CachedVulns {
-            vulns: vuln_ids,
+            vulns,
             cached_at: SystemTime::now(),
         };
 
-        if let Ok(content) = serde_json::to_string(&cached) {
-            if let Err(e) = std::fs::write(&path, content) {
-                debug!("Failed to write cache file {}: {}", path.display(), e);
-            }
+        if let Ok(content) = serde_json::to_string(&cached)
+            && let Err(e) = std::fs::write(&path, content)
+        {
+            debug!("Failed to write cache file {}: {}", path.display(), e);
         }
     }
 
@@ -618,6 +623,9 @@ pub struct Auditor {
     api_url: String,
     /// Request timeout
     timeout: Duration,
+    /// Optional response cache. When set, packages with a fresh cache entry
+    /// skip the OSV round-trip; misses populate the cache after fetching.
+    cache: Option<OsvCache>,
 }
 
 impl Auditor {
@@ -631,7 +639,15 @@ impl Auditor {
                 .expect("Failed to create HTTP client"),
             api_url: OSV_API_URL.to_string(),
             timeout: Duration::from_secs(30),
+            cache: None,
         }
+    }
+
+    /// Attach an `OsvCache` for response caching.
+    #[must_use]
+    pub fn with_cache(mut self, cache: OsvCache) -> Self {
+        self.cache = Some(cache);
+        self
     }
 
     /// Create an auditor with a custom API URL (for testing).
@@ -645,6 +661,7 @@ impl Auditor {
                 .expect("Failed to create HTTP client"),
             api_url: api_url.to_string(),
             timeout: Duration::from_secs(30),
+            cache: None,
         }
     }
 
@@ -680,33 +697,52 @@ impl Auditor {
             lockfile.packages.len()
         );
 
-        // Build batch queries
-        let queries: Vec<OsvQuery> = lockfile
-            .packages
-            .iter()
-            .map(|pkg| OsvQuery {
+        // Split packages into cache hits (no network needed) and misses
+        // (must be queried from OSV). Each query carries its (name, ecosystem,
+        // version) tuple so cache writes after the fetch can use the same key.
+        let mut queries: Vec<OsvQuery> = Vec::with_capacity(lockfile.packages.len());
+        let mut cache_hits = 0usize;
+        for pkg in &lockfile.packages {
+            let osv_eco = Self::ecosystem_to_osv(pkg.ecosystem);
+            if let Some(ref cache) = self.cache
+                && let Some(cached) = cache.get(osv_eco, &pkg.name, &pkg.version)
+            {
+                cache_hits += 1;
+                result.vulnerabilities.extend(cached);
+                continue;
+            }
+            queries.push(OsvQuery {
                 package: OsvPackage {
                     name: pkg.name.clone(),
-                    ecosystem: Self::ecosystem_to_osv(pkg.ecosystem).to_string(),
+                    ecosystem: osv_eco.to_string(),
                 },
                 version: pkg.version.clone(),
-            })
-            .collect();
+            });
+        }
 
-        // Process in batches
+        if cache_hits > 0 {
+            debug!(
+                "OSV cache: {} hit(s), {} miss(es)",
+                cache_hits,
+                queries.len()
+            );
+        }
+
+        // Process misses in batches
         for chunk in queries.chunks(OSV_BATCH_SIZE) {
             match self.query_batch(chunk).await {
                 Ok(vulns) => {
                     for (i, vuln_list) in vulns.into_iter().enumerate() {
                         if let Some(query) = chunk.get(i) {
                             let ecosystem = Self::parse_ecosystem(&query.package.ecosystem);
-                            for vuln in vuln_list {
-                                result.vulnerabilities.push(self.convert_vulnerability(
-                                    vuln,
-                                    &query.package.name,
-                                    ecosystem,
-                                ));
-                            }
+                            let converted: Vec<Vulnerability> = vuln_list
+                                .into_iter()
+                                .map(|v| {
+                                    self.convert_vulnerability(v, &query.package.name, ecosystem)
+                                })
+                                .collect();
+                            self.write_cache(query, &converted);
+                            result.vulnerabilities.extend(converted);
                         }
                     }
                 }
@@ -719,14 +755,19 @@ impl Auditor {
                     for query in chunk {
                         match self.query_single(query).await {
                             Ok(vulns) => {
-                                for vuln in vulns {
-                                    let ecosystem = Self::parse_ecosystem(&query.package.ecosystem);
-                                    result.vulnerabilities.push(self.convert_vulnerability(
-                                        vuln,
-                                        &query.package.name,
-                                        ecosystem,
-                                    ));
-                                }
+                                let ecosystem = Self::parse_ecosystem(&query.package.ecosystem);
+                                let converted: Vec<Vulnerability> = vulns
+                                    .into_iter()
+                                    .map(|v| {
+                                        self.convert_vulnerability(
+                                            v,
+                                            &query.package.name,
+                                            ecosystem,
+                                        )
+                                    })
+                                    .collect();
+                                self.write_cache(query, &converted);
+                                result.vulnerabilities.extend(converted);
                             }
                             Err(e) => {
                                 debug!("Failed to query {}: {}", query.package.name, e);
@@ -745,6 +786,17 @@ impl Auditor {
         );
 
         Ok(result)
+    }
+
+    fn write_cache(&self, query: &OsvQuery, vulns: &[Vulnerability]) {
+        if let Some(ref cache) = self.cache {
+            cache.set(
+                &query.package.ecosystem,
+                &query.package.name,
+                &query.version,
+                vulns.to_vec(),
+            );
+        }
     }
 
     /// Query OSV API for a batch of packages.

@@ -69,6 +69,8 @@ impl Default for LinuxSandbox {
 #[async_trait]
 impl Sandbox for LinuxSandbox {
     async fn execute(&self, config: &SandboxConfig) -> Result<SandboxResult, SandboxError> {
+        crate::runner::enforce_policy(config, IsolationLevel::Container)?;
+
         let config_with_default_rootfs;
         let config = if config.rootfs.is_some() {
             config

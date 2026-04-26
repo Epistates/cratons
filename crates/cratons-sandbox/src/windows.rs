@@ -503,6 +503,7 @@ impl Sandbox for WindowsSandbox {
         if config.command.is_empty() {
             return Err(SandboxError::Config("No command specified".into()));
         }
+        crate::runner::enforce_policy(config, IsolationLevel::Process)?;
 
         // Log network/mount warnings - not supported on Windows via Job Objects
         if !matches!(config.network, crate::config::NetworkAccess::Full) {

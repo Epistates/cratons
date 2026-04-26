@@ -116,6 +116,8 @@ impl AppleContainerSandbox {
 #[async_trait]
 impl Sandbox for AppleContainerSandbox {
     async fn execute(&self, config: &SandboxConfig) -> Result<SandboxResult, SandboxError> {
+        crate::runner::enforce_policy(config, IsolationLevel::Vm)?;
+
         // The 'container' tool usage (hypothetical based on OCI standards/repo description):
         // container run [options] <image> <command>
 
@@ -124,12 +126,19 @@ impl Sandbox for AppleContainerSandbox {
         // We'll assume for this implementation that we pass the rootfs directory as a bind mount
         // or that we are running a specific "base" image and mounting the workspace.
 
-        // For this 'SOTA' implementation, we'll map the config to a `container run` command.
-        // We assume we are running a standard Linux base image (e.g., alpine or debian)
-        // configured via env var or default.
-
-        let image =
-            std::env::var("CRATONS_LINUX_IMAGE").unwrap_or_else(|_| "debian:latest".to_string());
+        // SECURITY: Require the operator to opt into a specific image rather
+        // than silently fetching `debian:latest`. A latest-tag fetch implicitly
+        // trusts whatever image the registry serves at runtime, which is the
+        // exact supply-chain risk cratons exists to prevent. Fail closed when
+        // CRATONS_LINUX_IMAGE is unset; the operator pins a digest or tag.
+        let image = std::env::var("CRATONS_LINUX_IMAGE").map_err(|_| {
+            SandboxError::Config(
+                "Apple Container sandbox requires CRATONS_LINUX_IMAGE to be set to an explicit \
+                 image reference (preferably digest-pinned, e.g. \
+                 'debian@sha256:…'). Refusing to silently fetch 'debian:latest'."
+                    .into(),
+            )
+        })?;
 
         let mut cmd = Command::new(&self.tool_path);
 

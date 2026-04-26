@@ -41,6 +41,15 @@ pub struct SandboxConfig {
 
     /// Root filesystem for the container.
     pub rootfs: Option<PathBuf>,
+
+    /// Hard isolation requirements.
+    ///
+    /// When a field is `true`, a backend that cannot satisfy that property
+    /// must refuse with `SandboxError::Unsupported` rather than silently
+    /// degrading. This is how callers express "I will not run untrusted code
+    /// without filesystem isolation" rather than relying on the caller to
+    /// inspect `IsolationLevel::has_filesystem_isolation()` themselves.
+    pub policy: SandboxPolicy,
 }
 
 impl Default for SandboxConfig {
@@ -57,8 +66,32 @@ impl Default for SandboxConfig {
             inherit_env: false,
             stdin: None,
             rootfs: None,
+            policy: SandboxPolicy::default(),
         }
     }
+}
+
+/// Caller-declared isolation requirements that a backend must satisfy.
+///
+/// Set fields to `true` to make the backend refuse rather than silently
+/// degrade. Default is "best effort" — every field is `false`, matching
+/// the historical behaviour where callers chose isolation by selecting an
+/// `IsolationLevel`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct SandboxPolicy {
+    /// When `true`, the backend must provide filesystem isolation
+    /// (`IsolationLevel::has_filesystem_isolation()`). macOS sandbox-exec
+    /// does not satisfy this and will return `SandboxError::Unsupported`.
+    pub require_filesystem_isolation: bool,
+
+    /// When `true`, the backend must provide network isolation strong enough
+    /// to enforce `NetworkAccess::None` or `LocalhostOnly`.
+    pub require_network_isolation: bool,
+
+    /// When `true`, the backend must enforce CPU/memory resource limits.
+    /// macOS sandbox-exec and Windows Job Objects (without containers)
+    /// cannot satisfy this.
+    pub require_resource_limits: bool,
 }
 
 impl SandboxConfig {
@@ -131,6 +164,14 @@ impl SandboxConfig {
     #[must_use]
     pub fn inherit_env(mut self) -> Self {
         self.inherit_env = true;
+        self
+    }
+
+    /// Set the hard-isolation policy. Backends that cannot satisfy the
+    /// declared requirements must refuse rather than degrade.
+    #[must_use]
+    pub fn with_policy(mut self, policy: SandboxPolicy) -> Self {
+        self.policy = policy;
         self
     }
 }

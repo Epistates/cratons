@@ -112,7 +112,14 @@ impl QemuSandbox {
     }
 
     /// Generate the init script to run inside the VM.
-    fn generate_init_script(&self, config: &SandboxConfig) -> String {
+    ///
+    /// `nonce` is a per-invocation random token that is never exposed to the
+    /// guest's shell stdin/argv; it appears only in the init script that the
+    /// host writes. The host then accepts an exit-code line only when it
+    /// carries this nonce, defeating attempts by a malicious guest process to
+    /// forge a successful exit by printing `EXIT_CODE=0` on stdout before
+    /// continuing to do work.
+    fn generate_init_script(&self, config: &SandboxConfig, nonce: &str) -> String {
         // Properly shell-escape the command arguments
         let cmd_str = config
             .command
@@ -123,7 +130,7 @@ impl QemuSandbox {
 
         // Basic init script that mounts the workspace and runs the command
         format!(
-            "#!/bin/sh\nmount -t virtiofs workspace /mnt/workspace\ncd /mnt/workspace\nexport PATH=/bin:/usr/bin:/sbin:/usr/sbin\n{env_vars}\necho \"Running: {cmd}\"\n{cmd}\nEXIT_CODE=$?\necho \"EXIT_CODE=$EXIT_CODE\"\nsync\npoweroff -f\n",
+            "#!/bin/sh\nmount -t virtiofs workspace /mnt/workspace\ncd /mnt/workspace\nexport PATH=/bin:/usr/bin:/sbin:/usr/sbin\n{env_vars}\necho \"Running: {cmd}\"\n{cmd}\nEXIT_CODE=$?\necho \"CRATONS_EXIT_{nonce}=$EXIT_CODE\"\nsync\npoweroff -f\n",
             env_vars = config
                 .env
                 .iter()
@@ -131,7 +138,8 @@ impl QemuSandbox {
                 .map(|(k, v)| format!("export {}={}", k, shell_escape(v)))
                 .collect::<Vec<_>>()
                 .join("\n"),
-            cmd = cmd_str
+            cmd = cmd_str,
+            nonce = nonce,
         )
     }
 }
@@ -139,6 +147,8 @@ impl QemuSandbox {
 #[async_trait]
 impl Sandbox for QemuSandbox {
     async fn execute(&self, config: &SandboxConfig) -> Result<SandboxResult, SandboxError> {
+        crate::runner::enforce_policy(config, IsolationLevel::Vm)?;
+
         let qemu_config = self.config.as_ref().ok_or_else(|| {
             SandboxError::Config(
                 "QEMU kernel/initrd not configured. Set CRATONS_VM_KERNEL and CRATONS_VM_INITRD."
@@ -210,11 +220,12 @@ impl Sandbox for QemuSandbox {
         // We need to write the build script to the workspace
         let script_name = ".cratons-build-entrypoint.sh";
         let script_path = config.workdir.join(script_name);
-        let script_content = self.generate_init_script(config);
-
-        tokio::fs::write(&script_path, script_content)
+        // The script content (with nonce) is generated and written below,
+        // after the nonce is sampled. We pre-create the file with executable
+        // permissions so the write that follows updates it in place.
+        tokio::fs::write(&script_path, b"")
             .await
-            .map_err(|e| SandboxError::Io(e))?;
+            .map_err(SandboxError::Io)?;
 
         // Make executable
         #[cfg(unix)]
@@ -235,8 +246,55 @@ impl Sandbox for QemuSandbox {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
+        // Generate per-run nonce. Only the init script (written above) carries
+        // it; the guest cannot guess it, so it cannot forge an exit-code line.
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let script_content = self.generate_init_script(config, &nonce);
+        tokio::fs::write(&script_path, script_content)
+            .await
+            .map_err(SandboxError::Io)?;
+
         let start = Instant::now();
-        let output = cmd.output().await?;
+        // Wall-clock timeout. Without this, a hung guest can keep QEMU
+        // running forever even though the operator declared a build timeout.
+        // We rely on `-no-reboot` plus poweroff in the init script for the
+        // happy path; this guards against the guest never powering off.
+        let qemu_timeout = config
+            .limits
+            .timeout
+            .map(|t| t.saturating_add(std::time::Duration::from_secs(30)))
+            .unwrap_or(std::time::Duration::from_secs(3600));
+
+        let child = cmd.spawn().map_err(SandboxError::Io)?;
+        let wait_result = tokio::time::timeout(qemu_timeout, child.wait_with_output()).await;
+
+        let (output, timed_out) = match wait_result {
+            Ok(Ok(o)) => (o, false),
+            Ok(Err(e)) => {
+                let _ = tokio::fs::remove_file(&script_path).await;
+                return Err(SandboxError::Io(e));
+            }
+            Err(_elapsed) => {
+                // QEMU child still running; the future was dropped which
+                // closes the handle but does not always SIGKILL. Attempt to
+                // kill via QEMU monitor would be cleaner; for now we rely on
+                // tokio's drop semantics + the host operator's container
+                // wrapper to clean up.
+                let _ = tokio::fs::remove_file(&script_path).await;
+                return Ok(SandboxResult {
+                    exit_code: -1,
+                    stdout: Vec::new(),
+                    stderr: format!(
+                        "QEMU sandbox exceeded wall-clock timeout of {qemu_timeout:?}"
+                    )
+                    .into_bytes(),
+                    duration: start.elapsed(),
+                    timed_out: true,
+                    resource_exceeded: false,
+                    resource_usage: None,
+                });
+            }
+        };
         let duration = start.elapsed();
 
         // Cleanup
@@ -245,12 +303,19 @@ impl Sandbox for QemuSandbox {
         let stdout = output.stdout;
         let stderr = output.stderr;
 
-        // Parse exit code from stdout/stderr if QEMU itself succeeded
-        // (Since QEMU exit code is about QEMU, not the guest process usually)
+        // Parse exit code only when the host-issued nonce matches. If the
+        // guest exits without printing the nonce line, we treat the run as
+        // failed rather than silently returning 0.
         let exit_code = if output.status.success() {
-            // Parse the actual exit code from stdout where init script printed it
-            // Format: "EXIT_CODE=X" on its own line
-            parse_guest_exit_code(&stdout).unwrap_or(0)
+            match parse_guest_exit_code(&stdout, &nonce) {
+                Some(code) => code,
+                None => {
+                    debug!(
+                        "QEMU guest did not emit nonce-tagged exit code; treating as failure"
+                    );
+                    -1
+                }
+            }
         } else {
             output.status.code().unwrap_or(-1)
         };
@@ -260,7 +325,7 @@ impl Sandbox for QemuSandbox {
             stdout,
             stderr,
             duration,
-            timed_out: false,
+            timed_out,
             resource_exceeded: false,
             resource_usage: None,
         })
@@ -305,25 +370,24 @@ fn is_safe_shell_var_name(name: &str) -> bool {
 
 /// Parse guest exit code from stdout output.
 ///
-/// The init script should print "EXIT_CODE=X" on its own line.
-/// This function searches for that pattern and extracts X.
-fn parse_guest_exit_code(stdout: &[u8]) -> Option<i32> {
+/// Accepts only `CRATONS_EXIT_<nonce>=<code>` lines that carry the
+/// per-invocation nonce written into the host-controlled init script. The
+/// nonce is never exposed to the guest's shell stdin or arguments, so a
+/// build script cannot forge an exit-code line. The last matching line wins
+/// (the init script writes the line after the user command completes,
+/// immediately before `poweroff -f`).
+fn parse_guest_exit_code(stdout: &[u8], nonce: &str) -> Option<i32> {
     let output = String::from_utf8_lossy(stdout);
+    let prefix = format!("CRATONS_EXIT_{nonce}=");
 
+    let mut last = None;
     for line in output.lines() {
         let line = line.trim();
-        if let Some(code_str) = line.strip_prefix("EXIT_CODE=") {
-            if let Ok(code) = code_str.parse::<i32>() {
-                return Some(code);
-            }
-        }
-        // Also support "Exit code: X" format for backwards compatibility
-        if let Some(code_str) = line.strip_prefix("Exit code: ") {
-            if let Ok(code) = code_str.parse::<i32>() {
-                return Some(code);
-            }
+        if let Some(code_str) = line.strip_prefix(&prefix)
+            && let Ok(code) = code_str.parse::<i32>()
+        {
+            last = Some(code);
         }
     }
-
-    None
+    last
 }

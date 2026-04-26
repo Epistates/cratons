@@ -878,22 +878,74 @@ impl LockedPackage {
 
     /// Parse the integrity hash.
     ///
-    /// Supports npm-style integrity hashes in the format `sha256-<base64>` or `sha512-<base64>`.
+    /// Accepts both lockfile-native `algo:hex` format and npm Subresource
+    /// Integrity format (`sha256-<base64>`, `sha512-<base64>`,
+    /// `blake3-<base64>`). The SRI base64 payload is decoded and re-encoded
+    /// as lowercase hex so the resulting `ContentHash` always satisfies the
+    /// invariant that `value` is hex of the algorithm-specific length.
+    /// Without this conversion, a base64 string would be passed to consumers
+    /// that assume hex (display, `short`, equality with `Hasher` outputs).
     pub fn parse_integrity(&self) -> Result<ContentHash> {
-        // Format: sha256-base64 or sha512-base64
-        if let Some(hash) = self.integrity.strip_prefix("sha256-") {
-            Ok(ContentHash::sha256(hash.to_string()))
-        } else if let Some(hash) = self.integrity.strip_prefix("sha512-") {
-            // Properly store as SHA512 to preserve algorithm information
-            Ok(ContentHash::sha512(hash.to_string()))
-        } else if let Some(hash) = self.integrity.strip_prefix("blake3-") {
-            Ok(ContentHash::blake3(hash.to_string()))
+        use base64::Engine;
+        use cratons_core::HashAlgorithm;
+
+        let (algo, b64) = if let Some(rest) = self.integrity.strip_prefix("sha256-") {
+            (HashAlgorithm::Sha256, rest)
+        } else if let Some(rest) = self.integrity.strip_prefix("sha512-") {
+            (HashAlgorithm::Sha512, rest)
+        } else if let Some(rest) = self.integrity.strip_prefix("blake3-") {
+            (HashAlgorithm::Blake3, rest)
         } else {
-            Err(CratonsError::Lockfile(format!(
-                "Unknown integrity format: {}. Expected sha256-*, sha512-*, or blake3-*",
-                self.integrity
-            )))
+            return ContentHash::parse(&self.integrity).map_err(|e| {
+                CratonsError::Lockfile(format!(
+                    "Unrecognized integrity '{}': {e}. Expected sha256-<base64>, \
+                     sha512-<base64>, blake3-<base64>, or algo:hex",
+                    self.integrity
+                ))
+            });
+        };
+
+        // npm SRI uses standard base64 (with padding); some producers omit
+        // padding, so decode permissively.
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64.as_bytes()))
+            .map_err(|e| {
+                CratonsError::Lockfile(format!(
+                    "Invalid base64 in integrity '{}': {e}",
+                    self.integrity
+                ))
+            })?;
+
+        let expected_len = match algo {
+            HashAlgorithm::Sha256 | HashAlgorithm::Blake3 => 32,
+            HashAlgorithm::Sha512 => 64,
+        };
+        if bytes.len() != expected_len {
+            return Err(CratonsError::Lockfile(format!(
+                "Integrity '{}' decoded to {} bytes, expected {} for {algo}",
+                self.integrity,
+                bytes.len(),
+                expected_len
+            )));
         }
+
+        let hex = bytes
+            .iter()
+            .fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
+                use std::fmt::Write;
+                let _ = write!(acc, "{b:02x}");
+                acc
+            });
+
+        // Round-trip through ContentHash::parse so the hex-validation
+        // invariant is enforced uniformly.
+        ContentHash::parse(&format!("{algo}:{hex}")).map_err(|e| {
+            CratonsError::Lockfile(format!(
+                "Failed to construct ContentHash from integrity '{}': {e}",
+                self.integrity
+            ))
+        })
     }
 }
 
@@ -1183,38 +1235,54 @@ mod tests {
 
     #[test]
     fn test_locked_package_parse_integrity() {
+        // SHA-256 of empty string ("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        // base64 = 47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=
         let pkg = LockedPackage {
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             ecosystem: Ecosystem::Npm,
             source: "npm".to_string(),
-            integrity: "sha256-abc123def".to_string(),
-            resolved_hash: ContentHash::blake3("test".to_string()),
+            integrity: "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=".to_string(),
+            resolved_hash: ContentHash::blake3(
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ),
             direct: true,
             features: vec![],
             dependencies: vec![],
         };
 
         let hash = pkg.parse_integrity().unwrap();
-        assert_eq!(hash.value, "abc123def");
+        assert_eq!(
+            hash.value,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
     fn test_locked_package_parse_integrity_sha512() {
+        // SHA-512 of "" = cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e
+        // base64 = z4PhNX7vuL3xVChQ1m2AB9Yg5AULVxXcg/SpIdNs6c5H0NE8XYXysP+DGNKHfuwvY7kxvUdBeoGlODJ6+SfaPg==
         let pkg = LockedPackage {
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             ecosystem: Ecosystem::Npm,
             source: "npm".to_string(),
-            integrity: "sha512-longerhash".to_string(),
-            resolved_hash: ContentHash::blake3("test".to_string()),
+            integrity:
+                "sha512-z4PhNX7vuL3xVChQ1m2AB9Yg5AULVxXcg/SpIdNs6c5H0NE8XYXysP+DGNKHfuwvY7kxvUdBeoGlODJ6+SfaPg=="
+                    .to_string(),
+            resolved_hash: ContentHash::blake3(
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ),
             direct: true,
             features: vec![],
             dependencies: vec![],
         };
 
         let hash = pkg.parse_integrity().unwrap();
-        assert_eq!(hash.value, "longerhash");
+        assert_eq!(
+            hash.value,
+            "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+        );
     }
 
     #[test]
