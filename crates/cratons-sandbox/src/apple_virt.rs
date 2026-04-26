@@ -19,6 +19,75 @@ use crate::error::SandboxError;
 use crate::result::SandboxResult;
 use crate::{IsolationLevel, Sandbox};
 
+/// Cross-platform env-var deny-list for sandboxed builds.
+///
+/// Mirrors the Linux/Windows backends so the Apple Container path enforces
+/// the same posture: dangerous loader/scripting/credential variables never
+/// flow into the guest, even though the guest is in a VM.
+const BLOCKED_ENV_VARS: &[&str] = &[
+    // Credential leaks
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "NPM_TOKEN",
+    "PYPI_TOKEN",
+    "CARGO_REGISTRY_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AZURE_CLIENT_SECRET",
+    "DOCKER_AUTH_CONFIG",
+    // Dynamic-linker hijacks (relevant inside the Linux guest)
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    // Scripting-language code injection
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "NODE_EXTRA_CA_CERTS",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "CLASSPATH",
+    "PERL5OPT",
+    "PERL5LIB",
+    "RUBYOPT",
+    "RUBYLIB",
+    // Network proxy (potential exfil channel)
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "FTP_PROXY",
+    // Git exploitation
+    "GIT_ASKPASS",
+    "GIT_SSH_COMMAND",
+    "GIT_PROXY_COMMAND",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_EXEC_PATH",
+];
+
+const BLOCKED_ENV_PREFIXES: &[&str] = &["LD_", "DYLD_", "CRATONS_"];
+
+fn is_safe_env_var(name: &str) -> bool {
+    if BLOCKED_ENV_VARS
+        .iter()
+        .any(|blocked| blocked.eq_ignore_ascii_case(name))
+    {
+        return false;
+    }
+    let upper = name.to_ascii_uppercase();
+    !BLOCKED_ENV_PREFIXES
+        .iter()
+        .any(|prefix| upper.starts_with(prefix))
+}
+
 /// Sandbox using Apple's `container` tool (based on Virtualization.framework).
 ///
 /// This requires the `container` binary to be in the PATH.
@@ -69,14 +138,28 @@ impl Sandbox for AppleContainerSandbox {
 
         cmd.arg(&image);
 
-        // Environment
+        // Environment.
+        //
+        // SECURITY: filter through the cross-platform env deny-list before
+        // forwarding into the container. Previously every var in
+        // `config.env` was passed verbatim, so dangerous loader vars
+        // (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `_JAVA_OPTIONS`),
+        // credential tokens, and proxy vars flowed into the build
+        // unchecked, inconsistent with the Linux and Windows backends.
         if !config.inherit_env {
-            // 'container' tool might not support clearing env easily,
-            // but we can pass specific vars
+            // 'container' tool inherits a scrubbed env from the host by
+            // default; we only forward vars the operator explicitly set.
         }
         for (k, v) in &config.env {
-            cmd.arg("--env");
-            cmd.arg(format!("{}={}", k, v));
+            if is_safe_env_var(k) {
+                cmd.arg("--env");
+                cmd.arg(format!("{}={}", k, v));
+            } else {
+                tracing::debug!(
+                    env_var = %k,
+                    "Blocked dangerous env var in Apple Container sandbox"
+                );
+            }
         }
 
         // Workdir
@@ -113,14 +196,30 @@ impl Sandbox for AppleContainerSandbox {
             ));
         }
 
-        // Network
-        match config.network {
+        // Network.
+        //
+        // SECURITY: the `container` tool, like macOS sandbox-exec, has no
+        // per-host network filtering primitive. Previously `AllowList`
+        // silently fell through to "default network" (effectively full),
+        // turning a stricter caller request into a less restrictive
+        // sandbox without surfacing the change. Match the macOS backend
+        // and refuse rather than degrade.
+        match &config.network {
             NetworkAccess::None => {
                 cmd.arg("--network");
                 cmd.arg("none");
             }
-            _ => {
-                // Default is usually bridge/user
+            NetworkAccess::AllowList(hosts) => {
+                return Err(SandboxError::Unsupported(format!(
+                    "Apple Container backend cannot enforce per-host network \
+                     allowlists; refusing to silently degrade to full network. \
+                     Requested allowlist: {hosts:?}. Use NetworkAccess::Full to \
+                     opt in explicitly, or NetworkAccess::None / LocalhostOnly \
+                     for stricter isolation."
+                )));
+            }
+            NetworkAccess::LocalhostOnly | NetworkAccess::Full => {
+                // Default is usually bridge/user-mode networking.
             }
         }
 

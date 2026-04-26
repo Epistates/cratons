@@ -461,11 +461,20 @@ impl Lockfile {
             ))
         });
 
-        // Release lock
+        // Release lock.
+        //
+        // SECURITY: do NOT remove the lock file. Earlier versions of
+        // this code did `fs::remove_file(&lock_path)` here, which opened
+        // a concurrency hole — process A removes the directory entry,
+        // process C creates a new lock file at the same path (different
+        // inode) and acquires its lock, while process B is still
+        // blocked on A's released lock against the original (now
+        // unlinked) inode. B and C end up holding locks against
+        // different inodes and can both write to the lockfile
+        // simultaneously, corrupting it. The lock file is empty (~0
+        // bytes) and serves as a stable, persistent lock anchor across
+        // processes; leave it on disk.
         let _ = lock_file.unlock();
-
-        // Clean up lock file (best effort)
-        let _ = fs::remove_file(&lock_path);
 
         rename_result?;
         debug!("Saved lockfile to {}", path.display());

@@ -363,25 +363,57 @@ impl Dependency {
                     }
 
                     // URL sources MUST have a sha256 hash for integrity.
-                    if d.sha256.is_none() {
+                    let Some(ref sha256) = d.sha256 else {
                         return Err(CratonsError::Manifest(format!(
                             "URL dependency '{}' must specify sha256. \
                              URL sources have no registry to attest integrity, \
                              so an explicit sha256 is required.",
                             name
                         )));
-                    }
+                    };
+
+                    // SECURITY: validate the sha256 looks like an actual
+                    // sha256 (64 lowercase hex chars). Without this,
+                    // `sha256 = "deadbef"` (7 chars) or
+                    // `sha256 = "not-a-hash"` would pass manifest
+                    // validation and only fail at install time with a
+                    // confusing checksum-mismatch error.
+                    ContentHash::parse(&format!("sha256:{}", sha256.to_lowercase()))
+                        .map_err(|e| CratonsError::Manifest(format!(
+                            "URL dependency '{}' has invalid sha256: {}. \
+                             Expected 64 lowercase hex chars.",
+                            name, e
+                        )))?;
                 }
 
-                // Validate path source
+                // Validate path source.
+                //
+                // SECURITY: previously this used `path.contains("..")`,
+                // which both over-rejected safe inputs like `foo..bar`
+                // (literal name with two dots) and under-rejected
+                // absolute paths like `/etc/something`. The check now
+                // mirrors `WorkspaceDep::validate`: split on path
+                // separators, reject `..` segments individually, and
+                // reject absolute paths (Unix root, Windows root, drive
+                // prefix).
                 if let Some(ref path) = d.path {
-                    // Check for path traversal attempts
-                    if path.contains("..") {
+                    if path.starts_with('/')
+                        || path.starts_with('\\')
+                        || has_windows_drive_prefix(path)
+                    {
                         return Err(CratonsError::Manifest(format!(
-                            "Path dependency '{}' contains '..': {}. \
-                             Path traversal is not allowed.",
+                            "Path dependency '{}' must use a relative path, got {}",
                             name, path
                         )));
+                    }
+                    for segment in path.split(['/', '\\']) {
+                        if segment == ".." {
+                            return Err(CratonsError::Manifest(format!(
+                                "Path dependency '{}' contains '..': {}. \
+                                 Path traversal is not allowed.",
+                                name, path
+                            )));
+                        }
                     }
                 }
             }
@@ -704,6 +736,113 @@ mod tests {
             .validate("core")
             .expect_err("absolute Windows paths must be rejected on every host");
         assert!(err.to_string().contains("relative path"));
+    }
+
+    #[test]
+    fn url_dep_short_sha256_is_rejected() {
+        // Regression for D-1: previously any non-empty sha256 passed
+        // manifest validation; "deadbef" (7 chars) only failed at
+        // install time with a confusing checksum-mismatch error.
+        let dep = url_dep("https://example.com/pkg.tgz", Some("deadbef"));
+        let err = dep
+            .validate(Ecosystem::Url, "my-dep")
+            .expect_err("short sha256 must be rejected");
+        assert!(
+            err.to_string().contains("invalid sha256")
+                || err.to_string().contains("hex chars"),
+            "expected hex-validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn url_dep_non_hex_sha256_is_rejected() {
+        // Regression for D-1: non-hex sha256 must be rejected at parse.
+        let dep = url_dep(
+            "https://example.com/pkg.tgz",
+            Some("not-a-hex-string-not-a-hex-string-not-a-hex-string-not-a-hex-zz"),
+        );
+        let err = dep
+            .validate(Ecosystem::Url, "my-dep")
+            .expect_err("non-hex sha256 must be rejected");
+        assert!(
+            err.to_string().contains("invalid sha256")
+                || err.to_string().contains("hex"),
+            "expected hex-validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn url_dep_uppercase_hex_sha256_is_normalized_and_accepted() {
+        // Hex digests are case-insensitive in practice; accept either
+        // case but normalize to lowercase before comparing.
+        let dep = url_dep(
+            "https://example.com/pkg.tgz",
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        );
+        dep.validate(Ecosystem::Url, "my-dep")
+            .expect("lowercase hex sha256 must validate");
+
+        let dep = url_dep(
+            "https://example.com/pkg.tgz",
+            Some("ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789"),
+        );
+        dep.validate(Ecosystem::Url, "my-dep")
+            .expect("uppercase hex sha256 must validate after normalization");
+    }
+
+    #[test]
+    fn path_dep_absolute_path_is_rejected() {
+        // Regression for D-3: previously `path.contains("..")` was the
+        // only check, so `/etc/something` slipped through.
+        let dep = Dependency::Detailed(DetailedDependency {
+            path: Some("/etc/something".to_string()),
+            ..Default::default()
+        });
+        let err = dep
+            .validate(Ecosystem::Crates, "my-dep")
+            .expect_err("absolute path dependencies must be rejected");
+        assert!(
+            err.to_string().contains("relative path"),
+            "expected relative-path error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn path_dep_windows_absolute_path_is_rejected() {
+        let dep = Dependency::Detailed(DetailedDependency {
+            path: Some(r"C:\nope".to_string()),
+            ..Default::default()
+        });
+        let err = dep
+            .validate(Ecosystem::Crates, "my-dep")
+            .expect_err("Windows-absolute path dependencies must be rejected");
+        assert!(err.to_string().contains("relative path"));
+    }
+
+    #[test]
+    fn path_dep_parent_segment_is_rejected() {
+        let dep = Dependency::Detailed(DetailedDependency {
+            path: Some("../core".to_string()),
+            ..Default::default()
+        });
+        let err = dep
+            .validate(Ecosystem::Crates, "my-dep")
+            .expect_err("parent-traversing path dependencies must be rejected");
+        assert!(err.to_string().contains("contains '..'"));
+    }
+
+    #[test]
+    fn path_dep_dotted_segment_is_accepted() {
+        // Regression for D-3 over-rejection: `foo..bar` is a literal
+        // segment name, not path traversal, and previously failed the
+        // `path.contains("..")` substring check. With per-segment
+        // splitting it should now pass.
+        let dep = Dependency::Detailed(DetailedDependency {
+            path: Some("packages/foo..bar".to_string()),
+            ..Default::default()
+        });
+        dep.validate(Ecosystem::Crates, "my-dep")
+            .expect("non-traversal '..'-substring path must validate");
     }
 
     #[test]
