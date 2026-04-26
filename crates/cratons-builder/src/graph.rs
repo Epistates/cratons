@@ -303,6 +303,16 @@ impl<'a> BuildOrchestrator<'a> {
     /// Returns an error if any build fails, or if there's a cycle in
     /// the build graph.
     pub async fn execute(self, max_parallel: usize) -> Result<HashMap<String, BuildResult>> {
+        // Clamp parallelism to a sane bound. usize::MAX would attempt to spawn
+        // unbounded concurrent builds and exhaust file descriptors and memory.
+        // 4x logical CPUs is the upper limit for IO-bound build orchestration;
+        // CPU-bound work inside each build is gated by its own resource limits.
+        let cpu_count = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(4);
+        let cap = cpu_count.saturating_mul(4).max(1);
+        let max_parallel = max_parallel.clamp(1, cap);
+
         let batches = self.graph.parallel_batches()?;
         let mut results = HashMap::new();
 

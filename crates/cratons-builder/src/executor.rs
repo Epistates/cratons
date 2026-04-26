@@ -475,14 +475,19 @@ fn capture_outputs(config: &BuildConfig, workdir: &Path, output_dir: &Path) -> R
                     matched.display()
                 )));
             }
-            copy_output_path(workdir, &matched, output_dir)?;
+            copy_output_path(workdir, &canonical_workdir, &matched, output_dir)?;
         }
     }
 
     Ok(())
 }
 
-fn copy_output_path(workdir: &Path, source: &Path, output_dir: &Path) -> Result<()> {
+fn copy_output_path(
+    workdir: &Path,
+    canonical_workdir: &Path,
+    source: &Path,
+    output_dir: &Path,
+) -> Result<()> {
     let relative = source.strip_prefix(workdir).map_err(|e| {
         CratonsError::BuildFailed(format!(
             "Output path '{}' escaped the build workspace: {}",
@@ -522,9 +527,35 @@ fn copy_output_path(workdir: &Path, source: &Path, output_dir: &Path) -> Result<
                 remove_existing_path(&target)?;
                 LinkStrategy::Copy.link_file(entry.path(), &target)?;
             } else if entry.file_type().is_symlink() {
+                // SECURITY: A build script can plant symlinks pointing outside
+                // the workspace (e.g. /etc/passwd or ../../host-secret). Resolve
+                // the target through the entry's real location and reject any
+                // link whose resolved target escapes the build workspace before
+                // reproducing it in the artifact.
+                let resolved = fs::canonicalize(entry.path()).map_err(|e| {
+                    CratonsError::BuildFailed(format!(
+                        "Failed to resolve output symlink '{}': {}",
+                        entry.path().display(),
+                        e
+                    ))
+                })?;
+                if !resolved.starts_with(canonical_workdir) {
+                    return Err(CratonsError::BuildFailed(format!(
+                        "Output symlink '{}' resolves outside the build workspace",
+                        entry.path().display()
+                    )));
+                }
                 #[cfg(unix)]
                 {
                     let link_target = fs::read_link(entry.path())?;
+                    if link_target.is_absolute() {
+                        return Err(CratonsError::BuildFailed(format!(
+                            "Output symlink '{}' has absolute target '{}'; only relative \
+                             intra-workspace links are allowed",
+                            entry.path().display(),
+                            link_target.display()
+                        )));
+                    }
                     if let Some(parent) = target.parent() {
                         fs::create_dir_all(parent)?;
                     }
@@ -533,12 +564,11 @@ fn copy_output_path(workdir: &Path, source: &Path, output_dir: &Path) -> Result<
                 }
                 #[cfg(windows)]
                 {
-                    let canonical = fs::canonicalize(entry.path())?;
                     remove_existing_path(&target)?;
-                    if canonical.is_dir() {
-                        LinkStrategy::Copy.link_directory(&canonical, &target)?;
+                    if resolved.is_dir() {
+                        LinkStrategy::Copy.link_directory(&resolved, &target)?;
                     } else {
-                        LinkStrategy::Copy.link_file(&canonical, &target)?;
+                        LinkStrategy::Copy.link_file(&resolved, &target)?;
                     }
                 }
             }

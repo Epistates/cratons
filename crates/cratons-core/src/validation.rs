@@ -447,6 +447,36 @@ pub fn url_encode(s: &str) -> String {
     encoded
 }
 
+/// Escape a string for safe inclusion as a literal in a POSIX shell script.
+///
+/// # Security
+///
+/// Single-quotes the value and escapes embedded single quotes using the
+/// `'\''` pattern. The result is safe to interpolate into bash/zsh/sh
+/// scripts (e.g. `format!("PATH={}", posix_shell_escape(p))`).
+#[must_use]
+pub fn posix_shell_escape(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '@' | ':' | ','))
+    {
+        return s.to_string();
+    }
+    let escaped = s.replace('\'', "'\\''");
+    format!("'{escaped}'")
+}
+
+/// Escape a string for safe inclusion in a PowerShell single-quoted literal.
+///
+/// PowerShell single-quote strings escape `'` by doubling it (`''`).
+#[must_use]
+pub fn powershell_single_quote_escape(s: &str) -> String {
+    let escaped = s.replace('\'', "''");
+    format!("'{escaped}'")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

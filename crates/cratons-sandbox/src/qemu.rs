@@ -285,26 +285,7 @@ impl Default for QemuSandbox {
     }
 }
 
-/// Shell-escape a string for use in shell scripts.
-///
-/// Uses single quotes and escapes embedded single quotes using the
-/// `'\''` pattern (end quote, escaped quote, start quote).
-fn shell_escape(s: &str) -> String {
-    if s.is_empty() {
-        return "''".to_string();
-    }
-
-    // If the string contains no special characters, no quoting needed
-    if s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/')
-    {
-        return s.to_string();
-    }
-
-    // Use single quotes with embedded single quote escape
-    let escaped = s.replace('\'', "'\\''");
-    format!("'{}'", escaped)
-}
+use cratons_core::posix_shell_escape as shell_escape;
 
 /// Check if a variable name is safe for shell export.
 ///

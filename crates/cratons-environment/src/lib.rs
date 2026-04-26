@@ -279,11 +279,18 @@ impl Environment {
             path_components.push(java.bin_dir().to_string_lossy().to_string());
         }
 
-        // Construct combined PATH using platform-specific separator
+        // SECURITY: Use a fixed minimal base PATH instead of inheriting from the
+        // host process. Inheriting allows an attacker who controls the parent
+        // PATH (e.g. a CI runner or a user with write access to ~/.local/bin) to
+        // shadow hermetic tooling. The hermetic toolchain bin directories are
+        // prepended so they take precedence in normal use.
         if !path_components.is_empty() {
-            let existing_path = std::env::var("PATH").unwrap_or_default();
-            path_components.push(existing_path);
-            // Use platform-specific PATH separator: ";" on Windows, ":" on Unix
+            let base_path = if cfg!(windows) {
+                r"C:\Windows\System32;C:\Windows".to_string()
+            } else {
+                "/usr/local/bin:/usr/bin:/bin".to_string()
+            };
+            path_components.push(base_path);
             let separator = if cfg!(windows) { ";" } else { ":" };
             vars.insert("PATH".to_string(), path_components.join(separator));
         }

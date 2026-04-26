@@ -61,10 +61,16 @@ impl JavaEnv {
     pub fn env_vars(&self) -> HashMap<String, String> {
         let mut vars = HashMap::new();
 
-        // Set Maven repository location
+        // Set Maven repository location.
+        //
+        // SECURITY: MAVEN_OPTS is parsed as shell-split tokens by the JVM
+        // launcher, so a path containing whitespace (e.g.
+        // /home/me/My Projects/.cratons/...) would be split into multiple
+        // arguments and leak the tail as stray flags or class names. Wrap the
+        // path in double quotes so it stays a single token.
         vars.insert(
             "MAVEN_OPTS".to_string(),
-            format!("-Dmaven.repo.local={}", self.m2_repo.display()),
+            format!("\"-Dmaven.repo.local={}\"", self.m2_repo.display()),
         );
 
         vars

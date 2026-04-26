@@ -382,7 +382,16 @@ fn verify_python_version(path: &Path, expected_major_minor: &str) -> Result<bool
         .output()
         .map_err(|e| EnvironmentError::CommandFailed(format!("Failed to run Python: {}", e)))?;
 
-    let version_output = String::from_utf8_lossy(&output.stdout);
+    // Python 2 writes `--version` to stderr, Python 3 to stdout. Check both so
+    // a Python 2 binary doesn't silently report "no version" and slip past the
+    // version comparison.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let version_output = if stdout.trim().is_empty() {
+        stderr
+    } else {
+        stdout
+    };
     // Python --version outputs "Python X.Y.Z"
     let version_str = version_output
         .strip_prefix("Python ")

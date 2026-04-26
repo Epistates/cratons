@@ -1,5 +1,6 @@
 ---
 source: crates/cratons-environment/src/activation.rs
+assertion_line: 459
 expression: activate_content
 ---
 # Cratons environment activation script
@@ -38,18 +39,20 @@ _cratons_deactivate nondestructive
 _CRATONS_OLD_PATH="${PATH}"
 
 # Set new PATH
-PATH="/tmp/project/.cratons/env/python/bin:${PATH}"
+PATH=/tmp/project/.cratons/env/python/bin:"${PATH}"
 export PATH
 
 # Set environment marker
 CRATONS_ENV="1"
-CRATONS_ENV_ROOT="/tmp/project/.cratons/env"
+CRATONS_ENV_ROOT=/tmp/project/.cratons/env
 export CRATONS_ENV CRATONS_ENV_ROOT
-\n# Python environment
-VIRTUAL_ENV="/tmp/project/.cratons/env/python"
+
+# Python environment
+VIRTUAL_ENV=/tmp/project/.cratons/env/python
 PYTHONNOUSERSITE="1"
 export VIRTUAL_ENV PYTHONNOUSERSITE
-\n# Modify prompt
+
+# Modify prompt
 if [ -z "${CRATONS_ENV_DISABLE_PROMPT:-}" ]; then
     _CRATONS_OLD_PS1="${PS1:-}"
     PS1="(mei) ${PS1:-}"

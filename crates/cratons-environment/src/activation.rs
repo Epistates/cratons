@@ -9,6 +9,8 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+use cratons_core::{posix_shell_escape, powershell_single_quote_escape};
+
 use crate::{ENV_DIR, Environment, Result};
 
 /// Generate activation scripts for all supported shells.
@@ -33,25 +35,32 @@ fn generate_bash_script(env: &Environment, cratons_dir: &Path) -> Result<()> {
     let script_path = cratons_dir.join("activate");
     let mut file = File::create(&script_path)?;
 
-    // Collect PATH components
-    let mut path_components = Vec::new();
+    // SECURITY: All filesystem paths interpolated into the script must be
+    // POSIX-shell-escaped. Project directories may contain spaces, `$`,
+    // backticks, or quotes that would otherwise break the script or allow
+    // command substitution.
+    let mut path_components: Vec<String> = Vec::new();
     if let Some(ref python) = env.python {
-        path_components.push(python.bin_dir().to_string_lossy().to_string());
+        path_components.push(posix_shell_escape(&python.bin_dir().to_string_lossy()));
     }
     if let Some(ref node) = env.node {
-        path_components.push(node.bin_dir().to_string_lossy().to_string());
+        path_components.push(posix_shell_escape(&node.bin_dir().to_string_lossy()));
     }
     if let Some(ref rust) = env.rust {
-        path_components.push(rust.bin_dir().to_string_lossy().to_string());
+        path_components.push(posix_shell_escape(&rust.bin_dir().to_string_lossy()));
     }
     if let Some(ref go) = env.go {
-        path_components.push(go.bin_dir().to_string_lossy().to_string());
+        path_components.push(posix_shell_escape(&go.bin_dir().to_string_lossy()));
     }
 
-    // Use platform-specific PATH separator: ";" on Windows, ":" on Unix
-    let separator = if cfg!(windows) { ";" } else { ":" };
-    let path_additions = path_components.join(separator);
-    let env_root = env.root().to_string_lossy();
+    // Build a colon-joined PATH expression where each segment is independently
+    // quoted (so spaces inside individual paths don't bleed across segments).
+    let path_expr = if path_components.is_empty() {
+        "\"${PATH}\"".to_string()
+    } else {
+        format!("{}:\"${{PATH}}\"", path_components.join(":"))
+    };
+    let env_root = posix_shell_escape(&env.root().to_string_lossy());
 
     let mut script = format!(
         r#"# Cratons environment activation script
@@ -90,65 +99,49 @@ _cratons_deactivate nondestructive
 _CRATONS_OLD_PATH="${{PATH}}"
 
 # Set new PATH
-PATH="{path_additions}:${{PATH}}"
+PATH={path_expr}
 export PATH
 
 # Set environment marker
 CRATONS_ENV="1"
-CRATONS_ENV_ROOT="{env_root}"
+CRATONS_ENV_ROOT={env_root}
 export CRATONS_ENV CRATONS_ENV_ROOT
-"#,
-        path_additions = path_additions,
-        env_root = env_root,
+"#
     );
 
     // Add Python-specific variables
     if let Some(ref python) = env.python {
         script.push_str(&format!(
-            r#"\n# Python environment
-VIRTUAL_ENV="{}"
-PYTHONNOUSERSITE="1"
-export VIRTUAL_ENV PYTHONNOUSERSITE
-"#,
-            python.root().display()
+            "\n# Python environment\nVIRTUAL_ENV={}\nPYTHONNOUSERSITE=\"1\"\nexport VIRTUAL_ENV PYTHONNOUSERSITE\n",
+            posix_shell_escape(&python.root().to_string_lossy())
         ));
     }
 
     // Add Node.js-specific variables
-    if let Some(ref node) = env.node {
-        if node.node_modules().exists() {
-            script.push_str(&format!(
-                r#"\n# Node.js environment
-NODE_PATH="{}"
-export NODE_PATH
-"#,
-                node.node_modules().display()
-            ));
-        }
+    if let Some(ref node) = env.node
+        && node.node_modules().exists()
+    {
+        script.push_str(&format!(
+            "\n# Node.js environment\nNODE_PATH={}\nexport NODE_PATH\n",
+            posix_shell_escape(&node.node_modules().to_string_lossy())
+        ));
     }
 
     // Add Rust-specific variables
     if let Some(ref rust) = env.rust {
+        let cargo_home = rust.bin_dir().parent().unwrap_or(rust.root()).to_path_buf();
         script.push_str(&format!(
-            r#"\n# Rust environment
-CARGO_HOME="{}"
-export CARGO_HOME
-"#,
-            // L-15: Use unwrap_or to avoid panic on missing parent
-            rust.bin_dir().parent().unwrap_or(rust.root()).display()
+            "\n# Rust environment\nCARGO_HOME={}\nexport CARGO_HOME\n",
+            posix_shell_escape(&cargo_home.to_string_lossy())
         ));
     }
 
     // Add Go-specific variables
     if let Some(ref go) = env.go {
+        let gopath = go.bin_dir().parent().unwrap_or(go.root()).to_path_buf();
         script.push_str(&format!(
-            r#"\n# Go environment
-GOPATH="{}"
-GO111MODULE="on"
-export GOPATH GO111MODULE
-"#,
-            // L-15: Use unwrap_or to avoid panic on missing parent
-            go.bin_dir().parent().unwrap_or(go.root()).display()
+            "\n# Go environment\nGOPATH={}\nGO111MODULE=\"on\"\nexport GOPATH GO111MODULE\n",
+            posix_shell_escape(&gopath.to_string_lossy())
         ));
     }
 
@@ -157,7 +150,8 @@ export GOPATH GO111MODULE
     // Add prompt modification
     writeln!(
         file,
-        r#"\n# Modify prompt
+        r#"
+# Modify prompt
 if [ -z "${{CRATONS_ENV_DISABLE_PROMPT:-}}" ]; then
     _CRATONS_OLD_PS1="${{PS1:-}}"
     PS1="(mei) ${{PS1:-}}"
@@ -185,25 +179,29 @@ fn generate_fish_script(env: &Environment, cratons_dir: &Path) -> Result<()> {
     let script_path = cratons_dir.join("activate.fish");
     let mut file = File::create(&script_path)?;
 
-    let mut path_components = Vec::new();
+    // SECURITY: Single-quoting in fish disables all expansion. Embedded
+    // single quotes are escaped as `\'`.
+    let fish_quote = |s: &str| -> String {
+        let escaped = s.replace('\\', r"\\").replace('\'', r"\'");
+        format!("'{escaped}'")
+    };
+
+    let mut path_components: Vec<String> = Vec::new();
     if let Some(ref python) = env.python {
-        path_components.push(python.bin_dir().to_string_lossy().to_string());
+        path_components.push(fish_quote(&python.bin_dir().to_string_lossy()));
     }
     if let Some(ref node) = env.node {
-        path_components.push(node.bin_dir().to_string_lossy().to_string());
+        path_components.push(fish_quote(&node.bin_dir().to_string_lossy()));
     }
     if let Some(ref rust) = env.rust {
-        path_components.push(rust.bin_dir().to_string_lossy().to_string());
+        path_components.push(fish_quote(&rust.bin_dir().to_string_lossy()));
     }
     if let Some(ref go) = env.go {
-        path_components.push(go.bin_dir().to_string_lossy().to_string());
+        path_components.push(fish_quote(&go.bin_dir().to_string_lossy()));
     }
 
-    // L-06: Quote paths for fish to handle spaces correctly
-    let path_additions: Vec<String> = path_components
-        .iter()
-        .map(|p| format!("\"{}\"", p))
-        .collect();
+    let path_additions = path_components.join(" ");
+    let env_root = fish_quote(&env.root().to_string_lossy());
 
     writeln!(
         file,
@@ -241,7 +239,7 @@ set -gx PATH {path_additions} $PATH
 
 # Set environment markers
 set -gx CRATONS_ENV "1"
-set -gx CRATONS_ENV_ROOT "{env_root}"
+set -gx CRATONS_ENV_ROOT {env_root}
 
 function deactivate
     _cratons_deactivate
@@ -250,8 +248,6 @@ end
 echo "Cratons environment activated (fish)"
 echo "  Run 'deactivate' to exit"
 "#,
-        path_additions = path_additions.join(" "),
-        env_root = env.root().display(),
     )?;
 
     let mut perms = fs::metadata(&script_path)?.permissions();
@@ -266,21 +262,39 @@ fn generate_powershell_script(env: &Environment, cratons_dir: &Path) -> Result<(
     let script_path = cratons_dir.join("activate.ps1");
     let mut file = File::create(&script_path)?;
 
-    let mut path_components = Vec::new();
+    // SECURITY: Build the PATH expression by single-quoting each segment so
+    // shell metacharacters in paths cannot leak into PowerShell parsing.
+    let mut path_segments: Vec<String> = Vec::new();
     if let Some(ref python) = env.python {
-        path_components.push(python.bin_dir().to_string_lossy().to_string());
+        path_segments.push(powershell_single_quote_escape(
+            &python.bin_dir().to_string_lossy(),
+        ));
     }
     if let Some(ref node) = env.node {
-        path_components.push(node.bin_dir().to_string_lossy().to_string());
+        path_segments.push(powershell_single_quote_escape(
+            &node.bin_dir().to_string_lossy(),
+        ));
     }
     if let Some(ref rust) = env.rust {
-        path_components.push(rust.bin_dir().to_string_lossy().to_string());
+        path_segments.push(powershell_single_quote_escape(
+            &rust.bin_dir().to_string_lossy(),
+        ));
     }
     if let Some(ref go) = env.go {
-        path_components.push(go.bin_dir().to_string_lossy().to_string());
+        path_segments.push(powershell_single_quote_escape(
+            &go.bin_dir().to_string_lossy(),
+        ));
     }
 
-    let path_additions = path_components.join(";");
+    let path_expr = if path_segments.is_empty() {
+        "$env:PATH".to_string()
+    } else {
+        format!(
+            "({} -join ';') + ';' + $env:PATH",
+            format_args!("@({})", path_segments.join(", "))
+        )
+    };
+    let env_root = powershell_single_quote_escape(&env.root().to_string_lossy());
 
     writeln!(
         file,
@@ -308,17 +322,15 @@ function global:deactivate {{
 $env:_CRATONS_OLD_PATH = $env:PATH
 
 # Set new PATH
-$env:PATH = "{path_additions};$env:PATH"
+$env:PATH = {path_expr}
 
 # Set environment markers
 $env:CRATONS_ENV = "1"
-$env:CRATONS_ENV_ROOT = "{env_root}"
+$env:CRATONS_ENV_ROOT = {env_root}
 
 Write-Host "Cratons environment activated (PowerShell)"
 Write-Host "  Run 'deactivate' to exit"
 "#,
-        path_additions = path_additions,
-        env_root = env.root().display(),
     )?;
 
     Ok(())

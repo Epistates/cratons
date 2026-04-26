@@ -10,7 +10,9 @@
 //! All build configurations SHOULD be validated before execution using
 //! the [`BuildConfig::validate`] method.
 
-use cratons_core::{ContentHash, CratonsError, HashAlgorithm, Hasher, Result};
+use cratons_core::{
+    ContentHash, CratonsError, HashAlgorithm, Hasher, Result, validation::validate_path_component,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -157,6 +159,26 @@ impl BuildConfig {
         self.validate_env()?;
         self.validate_outputs()?;
         self.validate_workdir()?;
+        self.validate_refs()?;
+        Ok(())
+    }
+
+    fn validate_refs(&self) -> Result<()> {
+        let check = |field: &str, value: &str| -> Result<()> {
+            validate_path_component(value).map_err(|_| CratonsError::InvalidConfig {
+                message: format!("{field} '{value}' is not a valid path component"),
+            })
+        };
+        check("package_name", &self.package_name)?;
+        check("package_version", &self.package_version)?;
+        for tc in &self.toolchains {
+            check("toolchain name", &tc.name)?;
+            check("toolchain version", &tc.version)?;
+        }
+        for dep in &self.dependencies {
+            check("dependency name", &dep.name)?;
+            check("dependency version", &dep.version)?;
+        }
         Ok(())
     }
 
@@ -250,12 +272,21 @@ impl BuildConfig {
                 "LD_LIBRARY_PATH",
                 "LD_AUDIT",
                 "LD_DEBUG",
+                // macOS dynamic linker
+                "DYLD_INSERT_LIBRARIES",
+                "DYLD_LIBRARY_PATH",
+                "DYLD_FRAMEWORK_PATH",
+                "DYLD_FALLBACK_LIBRARY_PATH",
+                "DYLD_FALLBACK_FRAMEWORK_PATH",
+                // Shell config injection
                 "BASH_ENV",
                 "ENV",
                 "SHELLOPTS",
                 "BASHOPTS",
                 "GLOBIGNORE",
                 "IFS",
+                "PROMPT_COMMAND",
+                "PS4",
             ];
 
             if blocked_names.iter().any(|b| b.eq_ignore_ascii_case(name)) {
@@ -282,6 +313,17 @@ impl BuildConfig {
             if value.contains('\0') {
                 return Err(CratonsError::InvalidConfig {
                     message: format!("Environment variable '{}' contains null bytes", name),
+                });
+            }
+
+            // Newlines in env values can produce malformed env entries when joined
+            // (some runtimes split on \n) and break shell-script generation.
+            if value.contains('\n') || value.contains('\r') {
+                return Err(CratonsError::InvalidConfig {
+                    message: format!(
+                        "Environment variable '{}' contains newline characters",
+                        name
+                    ),
                 });
             }
         }
