@@ -366,13 +366,10 @@ impl RegistryClient for CratesIoClient {
             });
         }
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| CratonsError::Network(format!("Failed to read crate: {}", e)))?;
+        let bytes = super::collect_bounded(response, name).await?;
 
         debug!("Downloaded {} bytes for {}@{}", bytes.len(), name, version);
-        Ok(bytes.to_vec())
+        Ok(bytes)
     }
 
     #[instrument(skip(self), fields(ecosystem = "crates"))]

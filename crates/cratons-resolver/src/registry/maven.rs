@@ -286,22 +286,24 @@ impl RegistryClient for MavenClient {
 
         let mut versions = Self::parse_metadata_xml(&xml)?;
 
-        // Sort by version (ascending for MVS)
-        // Maven versions are typically like 1.2.3 or 1.2.3-SNAPSHOT
+        // Sort by version (ascending for MVS).
+        //
+        // CORRECTNESS: previously this used string comparison on a hand-rolled
+        // pre-normalization (`replace("-SNAPSHOT","").replace('-', ".")`),
+        // which sorted "1.10" before "1.2" lexicographically and broke MVS
+        // resolution on any artifact whose minor or patch version reached
+        // double digits. We now route through `Version::parse` so the sort
+        // uses the same Maven qualifier ordering (alpha < beta < rc <
+        // snapshot < release < sp) as the rest of cratons.
         versions.sort_by(|a, b| {
-            // Simple comparison - prefer non-SNAPSHOT versions (they come first)
-            let a_snapshot = a.contains("SNAPSHOT");
-            let b_snapshot = b.contains("SNAPSHOT");
-
-            match (a_snapshot, b_snapshot) {
-                (true, false) => std::cmp::Ordering::Greater, // b (non-snapshot) first
-                (false, true) => std::cmp::Ordering::Less,    // a (non-snapshot) first
-                _ => {
-                    // Both same type, compare version numbers (ascending for MVS)
-                    let va = a.replace("-SNAPSHOT", "").replace('-', ".");
-                    let vb = b.replace("-SNAPSHOT", "").replace('-', ".");
-                    va.cmp(&vb)
-                }
+            match (
+                cratons_core::Version::parse(a, Ecosystem::Maven),
+                cratons_core::Version::parse(b, Ecosystem::Maven),
+            ) {
+                (Ok(va), Ok(vb)) => va.cmp(&vb),
+                (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                (Err(_), Err(_)) => a.cmp(b),
             }
         });
 
@@ -407,13 +409,10 @@ impl RegistryClient for MavenClient {
             });
         }
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| CratonsError::Network(format!("Failed to read JAR: {}", e)))?;
+        let bytes = super::collect_bounded(response, name).await?;
 
         debug!("Downloaded {} bytes for {}@{}", bytes.len(), name, version);
-        Ok(bytes.to_vec())
+        Ok(bytes)
     }
 
     #[instrument(skip(self), fields(ecosystem = "maven"))]

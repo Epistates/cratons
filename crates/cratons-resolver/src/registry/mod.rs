@@ -37,6 +37,52 @@ pub use pypi::PyPiClient;
 
 use async_trait::async_trait;
 use cratons_core::{CratonsError, Ecosystem, Result};
+use futures::StreamExt;
+
+/// Hard upper bound for any single artifact downloaded through the
+/// resolver's `RegistryClient::download` path.
+///
+/// Mirrors the installer's `MAX_DOWNLOAD_BYTES`. Resolver downloads are
+/// not on the default install path (the installer's downloader is) but
+/// the trait method is `pub` and could be called by tooling, so the
+/// same DoS guard belongs here. Set to 2 GiB so any registry, mirror,
+/// or proxy-controlled response that tries to balloon the resolver's
+/// memory hits the limit before the body is fully buffered.
+pub const MAX_REGISTRY_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Stream a response body into a `Vec<u8>` while enforcing
+/// [`MAX_REGISTRY_DOWNLOAD_BYTES`]. Honors `Content-Length` if the
+/// server sets it (early reject) and re-checks while streaming to
+/// catch servers that lie about the length.
+pub(crate) async fn collect_bounded(
+    response: reqwest::Response,
+    package: &str,
+) -> Result<Vec<u8>> {
+    if let Some(content_length) = response.content_length() {
+        if content_length > MAX_REGISTRY_DOWNLOAD_BYTES {
+            return Err(CratonsError::Network(format!(
+                "Refusing to download {}: Content-Length {} exceeds maximum {} bytes",
+                package, content_length, MAX_REGISTRY_DOWNLOAD_BYTES
+            )));
+        }
+    }
+
+    let mut buf = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|e| CratonsError::Network(format!("Failed to read response: {}", e)))?;
+        let next_len = buf.len() as u64 + chunk.len() as u64;
+        if next_len > MAX_REGISTRY_DOWNLOAD_BYTES {
+            return Err(CratonsError::Network(format!(
+                "Refusing to download {}: response exceeded maximum {} bytes",
+                package, MAX_REGISTRY_DOWNLOAD_BYTES
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
 use cratons_store::{CachedMetadata, RegistryCache};
 use governor::{
     Quota, RateLimiter,
