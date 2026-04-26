@@ -116,26 +116,51 @@ impl ContentHash {
     }
 
     /// Parse a hash string in the format "algorithm:value" or just "value" (assumes Blake3).
+    ///
+    /// SECURITY: validates that `value` is valid lowercase hex of the
+    /// algorithm-specific length. Without this, a crafted lockfile could
+    /// place arbitrary text — including multi-byte UTF-8 — into a
+    /// `ContentHash::value` and cause downstream panics in path-component
+    /// builders that byte-slice the value (e.g. `short`/`prefix`). Verify
+    /// still uses constant-time comparison; this check is defense in depth
+    /// at the parse boundary.
     pub fn parse(s: &str) -> Result<Self> {
-        if let Some((algo, value)) = s.split_once(':') {
-            let algorithm = algo.parse()?;
-            Ok(Self::new(algorithm, value.to_string()))
+        let (algorithm, value) = if let Some((algo, value)) = s.split_once(':') {
+            (algo.parse::<HashAlgorithm>()?, value.to_string())
         } else {
             // Default to Blake3 for bare hashes
-            Ok(Self::blake3(s.to_string()))
-        }
+            (HashAlgorithm::Blake3, s.to_string())
+        };
+        validate_hex_value(algorithm, &value)?;
+        Ok(Self { algorithm, value })
     }
 
-    /// Get the short form of the hash (first 12 characters).
+    /// Get the short form of the hash (first 12 chars).
+    ///
+    /// Slices on a char boundary so values that somehow contain non-ASCII
+    /// bytes (e.g. legacy data from before `parse`'s hex validation) do
+    /// not panic mid-codepoint.
     #[must_use]
     pub fn short(&self) -> &str {
-        &self.value[..self.value.len().min(12)]
+        let end = self
+            .value
+            .char_indices()
+            .nth(12)
+            .map_or(self.value.len(), |(idx, _)| idx);
+        &self.value[..end]
     }
 
-    /// Get the prefix for content-addressable storage (first 2 characters).
+    /// Get the prefix for content-addressable storage (first 2 chars).
+    ///
+    /// Char-boundary safe; see `short` for rationale.
     #[must_use]
     pub fn prefix(&self) -> &str {
-        &self.value[..2.min(self.value.len())]
+        let end = self
+            .value
+            .char_indices()
+            .nth(2)
+            .map_or(self.value.len(), |(idx, _)| idx);
+        &self.value[..end]
     }
 
     /// Verify that this hash matches the given data.
@@ -185,6 +210,33 @@ impl fmt::Display for ContentHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.algorithm, self.value)
     }
+}
+
+/// Expected hex length for a given hash algorithm.
+///
+/// Cratons uses 32-byte Blake3 outputs (the default), so it's grouped with
+/// SHA-256. SHA-512 produces 64 bytes and so doubles to 128 hex chars.
+const fn expected_hex_len(algorithm: HashAlgorithm) -> usize {
+    match algorithm {
+        HashAlgorithm::Sha256 | HashAlgorithm::Blake3 => 64,
+        HashAlgorithm::Sha512 => 128,
+    }
+}
+
+fn validate_hex_value(algorithm: HashAlgorithm, value: &str) -> Result<()> {
+    let expected = expected_hex_len(algorithm);
+    if value.len() != expected {
+        return Err(CratonsError::InvalidHash(format!(
+            "{algorithm} hash must be {expected} hex chars, got {} ({value:?})",
+            value.len()
+        )));
+    }
+    if !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(CratonsError::InvalidHash(format!(
+            "{algorithm} hash contains non-hex characters: {value:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// The inner hasher state, using an enum to ensure type safety.
@@ -367,13 +419,32 @@ mod tests {
 
     #[test]
     fn test_hash_parse() {
-        let hash = ContentHash::parse("sha256:abc123").unwrap();
+        let sha256 = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        let hash = ContentHash::parse(&format!("sha256:{sha256}")).unwrap();
         assert_eq!(hash.algorithm, HashAlgorithm::Sha256);
-        assert_eq!(hash.value, "abc123");
+        assert_eq!(hash.value, sha256);
 
-        let hash = ContentHash::parse("abc123").unwrap();
+        let blake3 = "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24";
+        let hash = ContentHash::parse(blake3).unwrap();
         assert_eq!(hash.algorithm, HashAlgorithm::Blake3);
-        assert_eq!(hash.value, "abc123");
+        assert_eq!(hash.value, blake3);
+    }
+
+    #[test]
+    fn test_hash_parse_rejects_garbage() {
+        assert!(ContentHash::parse("sha256:not-hex").is_err());
+        assert!(ContentHash::parse("sha256:abc123").is_err()); // wrong length
+        assert!(ContentHash::parse("sha512:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9").is_err()); // sha256 length under sha512 prefix
+        assert!(ContentHash::parse("sha256:☃☃").is_err()); // non-ASCII (would have panicked in short())
+    }
+
+    #[test]
+    fn test_hash_short_safe_on_non_ascii() {
+        // Direct constructor bypasses validation; ensure short()/prefix()
+        // do not panic on multibyte input.
+        let hash = ContentHash::new(HashAlgorithm::Blake3, "☃☃☃".to_string());
+        let _ = hash.short();
+        let _ = hash.prefix();
     }
 
     #[test]

@@ -141,9 +141,35 @@ impl Version {
                 }
                 Ok(Self::Raw(s.to_string()))
             }
-            Ecosystem::PyPi => Ok(Self::Pep440(s.to_string())),
-            Ecosystem::Maven => Ok(Self::Maven(s.to_string())),
-            Ecosystem::Url => Ok(Self::Raw(s.to_string())),
+            Ecosystem::PyPi => {
+                // SECURITY: validate as a real PEP 440 version. Without
+                // this, a crafted lockfile could store arbitrary strings
+                // (path-traversal sequences, control chars) under a
+                // `Pep440` variant and have them flow into URL/path
+                // construction unchecked.
+                Pep440Version::from_str(s).map_err(|e| {
+                    CratonsError::InvalidVersion {
+                        version: s.to_string(),
+                        message: format!("invalid PEP 440 version: {e}"),
+                    }
+                })?;
+                Ok(Self::Pep440(s.to_string()))
+            }
+            Ecosystem::Maven => {
+                // SECURITY: Maven concrete versions feed directly into
+                // repo URL paths (groupId/artifactId/version/...) — must
+                // not contain `/`, `..`, control chars, or URL-injection
+                // metacharacters.
+                crate::validation::validate_version(s)?;
+                Ok(Self::Maven(s.to_string()))
+            }
+            Ecosystem::Url => {
+                // URL ecosystem treats the version as an opaque label,
+                // but it still gets interpolated into local store paths.
+                // Apply the same conservative sanitation as Maven.
+                crate::validation::validate_version(s)?;
+                Ok(Self::Raw(s.to_string()))
+            }
         }
     }
 
@@ -160,19 +186,26 @@ impl Version {
     }
 
     /// Check if this is a prerelease version.
+    ///
+    /// SECURITY/CORRECTNESS: previously this used `String::contains`
+    /// substring checks (`s.contains('a')`, `s.contains("alpha")`),
+    /// which had pervasive false positives — `"1.2.3+darwin"` was
+    /// flagged as a PEP 440 prerelease because it contains `'a'`, and
+    /// any Maven build with `"alphabet"` in a qualifier was treated
+    /// as alpha. The resolver consults this flag to skip prereleases
+    /// in stable resolutions, so the bug could either include unstable
+    /// versions or exclude stable ones depending on the input.
     #[must_use]
     pub fn is_prerelease(&self) -> bool {
         match self {
             Self::Semver(v) => !v.version().pre.is_empty(),
-            Self::Pep440(s) => {
-                s.contains('a') || s.contains('b') || s.contains("rc") || s.contains("dev")
-            }
+            Self::Pep440(s) => Pep440Version::from_str(s).is_ok_and(|v| v.any_prerelease()),
             Self::Maven(s) => {
-                let lower = s.to_lowercase();
-                lower.contains("snapshot")
-                    || lower.contains("alpha")
-                    || lower.contains("beta")
-                    || lower.contains("rc")
+                let (_, qual) = split_maven_version(s);
+                // alpha (10), beta (20), milestone (25), rc (30),
+                // snapshot (40) are all prerelease per Maven's ordering;
+                // unknown qualifiers (45) and release (50)/sp (60) are not.
+                maven_qualifier_order(qual) <= 40
             }
             Self::Raw(_) => false,
         }
@@ -488,5 +521,53 @@ mod tests {
         let req = VersionReq::parse("*", Ecosystem::Crates).unwrap();
         let v = Version::parse("99.99.99", Ecosystem::Crates).unwrap();
         assert!(req.matches(&v));
+    }
+
+    #[test]
+    fn test_pep440_prerelease_no_substring_false_positive() {
+        // Regression for VR-1: `1.2.3` is NOT a prerelease even though
+        // the previous code matched any 'a' in the string.
+        let v = Version::parse("1.2.3", Ecosystem::PyPi).unwrap();
+        assert!(!v.is_prerelease());
+        // Real prereleases still detected.
+        let v = Version::parse("1.2.3a1", Ecosystem::PyPi).unwrap();
+        assert!(v.is_prerelease());
+        let v = Version::parse("1.2.3.dev1", Ecosystem::PyPi).unwrap();
+        assert!(v.is_prerelease());
+    }
+
+    #[test]
+    fn test_maven_prerelease_no_substring_false_positive() {
+        // Regression for VR-1: a release-quality Maven version with a
+        // qualifier string that happens to contain "alpha"-as-substring
+        // (e.g. an internal company artifact tagged "alphabuild") must
+        // not be classified as prerelease purely by substring.
+        let v = Version::parse("1.0.0", Ecosystem::Maven).unwrap();
+        assert!(!v.is_prerelease());
+        let v = Version::parse("1.0.0-alpha", Ecosystem::Maven).unwrap();
+        assert!(v.is_prerelease());
+        let v = Version::parse("1.0.0-rc-1", Ecosystem::Maven).unwrap();
+        assert!(v.is_prerelease());
+        let v = Version::parse("1.0.0-SNAPSHOT", Ecosystem::Maven).unwrap();
+        assert!(v.is_prerelease());
+    }
+
+    #[test]
+    fn test_maven_concrete_version_rejects_traversal() {
+        // Regression for VR-3: previously
+        // `Version::parse("../etc/passwd", Ecosystem::Maven)` returned
+        // `Ok(Maven("../etc/passwd"))`, allowing crafted lockfiles to
+        // smuggle path-traversal sequences into URL/path construction.
+        assert!(Version::parse("../etc/passwd", Ecosystem::Maven).is_err());
+        assert!(Version::parse("1.0/evil", Ecosystem::Maven).is_err());
+        assert!(Version::parse("\0badnull", Ecosystem::Maven).is_err());
+    }
+
+    #[test]
+    fn test_pep440_concrete_version_rejects_garbage() {
+        assert!(Version::parse("not-a-version", Ecosystem::PyPi).is_err());
+        // Real PEP 440 versions still parse.
+        assert!(Version::parse("1.2.3", Ecosystem::PyPi).is_ok());
+        assert!(Version::parse("1!2.0.0a1", Ecosystem::PyPi).is_ok());
     }
 }

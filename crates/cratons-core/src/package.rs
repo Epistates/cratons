@@ -126,28 +126,54 @@ impl PackageSpec {
         Ok(Self::new(id, version_req))
     }
 
-    /// Parse a package spec from a CLI-style string like "npm:lodash@^4.17.0".
+    /// Parse a package spec from a CLI-style string like
+    /// `npm:lodash@^4.17.0` or `npm:@types/node@^18.0.0`.
+    ///
+    /// CORRECTNESS: previously `s.rfind('@')` was paired with the slice
+    /// `s[1..at_pos]` to detect scoped npm names. For `"@types/node"`
+    /// (no version, no ecosystem prefix), `at_pos` was `0` and the
+    /// expression became `&s[1..0]`, which panics on inverted ranges.
+    /// The function is now structured around the ecosystem prefix and
+    /// only searches for the version `@` *after* the scope's `/`,
+    /// which removes the panic and accepts both `npm:@scope/name` and
+    /// `npm:@scope/name@1.0`.
     pub fn parse(s: &str) -> Result<Self> {
-        // Format: ecosystem:name@version or ecosystem:name
-        let (id_part, version_part) = if let Some(at_pos) = s.rfind('@') {
-            // Check if @ is part of scoped package name
-            if s.starts_with('@') && !s[1..at_pos].contains('/') {
-                // This is a scoped package without version
-                (s, None)
-            } else {
-                (&s[..at_pos], Some(&s[at_pos + 1..]))
+        // Required form: `ecosystem:name[@version]`. Anything else
+        // (including a bare `@scope/name`) is a malformed spec — return
+        // an error rather than panicking.
+        let (ecosystem_part, rest) = s.split_once(':').ok_or_else(|| {
+            CratonsError::Manifest(format!(
+                "Invalid package spec format: {s}. Expected 'ecosystem:name[@version]'"
+            ))
+        })?;
+        let ecosystem: Ecosystem = ecosystem_part.parse()?;
+
+        // Within `rest`, the version separator is the LAST `@`. For
+        // scoped npm names (`@scope/name`) the leading `@` is part of
+        // the name; the version `@`, if present, must come after the
+        // first `/`.
+        let (name_part, version_part) = if rest.starts_with('@') {
+            match rest.find('/') {
+                Some(slash) => match rest[slash..].find('@') {
+                    Some(rel) => {
+                        let at = slash + rel;
+                        (&rest[..at], Some(&rest[at + 1..]))
+                    }
+                    None => (rest, None),
+                },
+                None => (rest, None),
             }
+        } else if let Some(at) = rest.rfind('@') {
+            (&rest[..at], Some(&rest[at + 1..]))
         } else {
-            (s, None)
+            (rest, None)
         };
 
-        let id = PackageId::parse(id_part)?;
-        let version_req = if let Some(v) = version_part {
-            VersionReq::parse(v, id.ecosystem)?
-        } else {
-            VersionReq::Any
+        let id = PackageId::new(ecosystem, name_part);
+        let version_req = match version_part {
+            Some(v) => VersionReq::parse(v, ecosystem)?,
+            None => VersionReq::Any,
         };
-
         Ok(Self::new(id, version_req))
     }
 
@@ -255,5 +281,29 @@ mod tests {
     fn test_package_spec_display() {
         let spec = PackageSpec::from_parts(Ecosystem::Crates, "serde", "1.0").unwrap();
         assert!(spec.to_string().contains("serde"));
+    }
+
+    #[test]
+    fn test_package_spec_parse_scoped_with_version() {
+        let spec = PackageSpec::parse("npm:@types/node@^18.0.0").unwrap();
+        assert_eq!(spec.id.ecosystem, Ecosystem::Npm);
+        assert_eq!(spec.id.name, "@types/node");
+        assert!(matches!(spec.version_req, VersionReq::Npm(_)));
+    }
+
+    #[test]
+    fn test_package_spec_parse_scoped_without_version() {
+        let spec = PackageSpec::parse("npm:@types/node").unwrap();
+        assert_eq!(spec.id.name, "@types/node");
+        assert!(matches!(spec.version_req, VersionReq::Any));
+    }
+
+    #[test]
+    fn test_package_spec_parse_bare_scoped_name_does_not_panic() {
+        // Regression for P-1: previously panicked with
+        // "begin > end (1 > 0)" on `@types/node` because rfind('@')
+        // returned 0 and `&s[1..0]` is an inverted slice.
+        let result = PackageSpec::parse("@types/node");
+        assert!(result.is_err());
     }
 }
