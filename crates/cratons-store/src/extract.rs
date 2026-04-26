@@ -19,6 +19,49 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use tracing::{debug, warn};
 
+/// Hard upper bound on the total extracted bytes from a single archive.
+///
+/// This caps zip-bomb / tar-bomb DoS: a small compressed input that
+/// decompresses to terabytes will hit this limit and abort extraction
+/// rather than fill the host disk. 16 GiB is generous enough for legitimate
+/// large packages (e.g. fat node_modules trees, multi-arch toolchains)
+/// while still bounding pathological inputs orders of magnitude below
+/// modern disk sizes.
+pub const MAX_EXTRACTED_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+/// Bounded copy from a reader into a writer that aborts when the running
+/// total across all archive entries exceeds [`MAX_EXTRACTED_BYTES`].
+fn copy_with_extracted_budget<R: Read, W: io::Write>(
+    src: &mut R,
+    dst: &mut W,
+    extracted_total: &mut u64,
+    archive_kind: &'static str,
+) -> Result<u64> {
+    // Heap-allocated to keep the stack frame small; the same pattern is
+    // used in cratons-core hash::hash_file for the same reason.
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut entry_total = 0u64;
+    loop {
+        let n = src.read(&mut buf)?;
+        if n == 0 {
+            return Ok(entry_total);
+        }
+        let next_total = extracted_total.saturating_add(n as u64);
+        if next_total > MAX_EXTRACTED_BYTES {
+            return Err(CratonsError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} archive exceeded extraction budget ({} bytes); refusing to continue",
+                    archive_kind, MAX_EXTRACTED_BYTES
+                ),
+            )));
+        }
+        dst.write_all(&buf[..n])?;
+        *extracted_total = next_total;
+        entry_total = entry_total.saturating_add(n as u64);
+    }
+}
+
 /// Validates that a path is safe to extract to within a destination directory.
 ///
 /// Returns the sanitized path relative to the destination, or an error if the
@@ -322,6 +365,9 @@ pub fn safe_unpack_tar_with_strip<R: Read>(
     // Ensure destination exists and is a directory
     fs::create_dir_all(dest)?;
 
+    // Track cumulative extracted bytes to enforce MAX_EXTRACTED_BYTES.
+    let mut extracted_total: u64 = 0;
+
     // Get entries and process them one by one with validation
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
@@ -366,9 +412,9 @@ pub fn safe_unpack_tar_with_strip<R: Read>(
                     fs::create_dir_all(parent)?;
                 }
 
-                // Extract file
+                // Extract file with cumulative-byte budget enforcement.
                 let mut file = File::create(&full_path)?;
-                io::copy(&mut entry, &mut file)?;
+                copy_with_extracted_budget(&mut entry, &mut file, &mut extracted_total, "tar")?;
 
                 // Preserve permissions on Unix, but strip SUID/SGID/sticky
                 // bits. A malicious archive must never be able to install a
@@ -498,6 +544,10 @@ pub fn safe_extract_zip_with_strip(
     // Ensure destination exists
     fs::create_dir_all(dest)?;
 
+    // Track cumulative extracted bytes to enforce MAX_EXTRACTED_BYTES.
+    // Caps zip-bomb DoS: a small malicious zip can decompress to TBs.
+    let mut extracted_total: u64 = 0;
+
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(|e| {
             CratonsError::Io(io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
@@ -542,9 +592,9 @@ pub fn safe_extract_zip_with_strip(
                 fs::create_dir_all(parent)?;
             }
 
-            // Extract file
+            // Extract file with cumulative-byte budget enforcement.
             let mut outfile = File::create(&full_path)?;
-            io::copy(&mut file, &mut outfile)?;
+            copy_with_extracted_budget(&mut file, &mut outfile, &mut extracted_total, "zip")?;
 
             // Preserve permissions on Unix, but strip SUID/SGID/sticky
             // bits so a malicious zip cannot install a setuid binary.
@@ -672,6 +722,25 @@ mod tests {
             mode
         );
         assert_eq!(mode & 0o777, 0o755, "standard permissions must survive");
+    }
+
+    #[test]
+    fn test_safe_unpack_tar_enforces_extraction_budget() {
+        // Regression for E-4: a malicious tar with a single oversized
+        // entry must not be allowed to fill the host disk. Use a tiny
+        // local cap by re-using the public budget against a generous
+        // payload — the payload is larger than the local check window
+        // but still small enough for tests. We check the helper
+        // directly so the test stays cheap.
+        let mut sink = Vec::new();
+        let mut src = std::io::repeat(b'x').take(1024 * 1024); // 1 MiB stream
+        let mut total: u64 = MAX_EXTRACTED_BYTES - 512;
+        let err = copy_with_extracted_budget(&mut src, &mut sink, &mut total, "tar")
+            .expect_err("budget overrun must error");
+        assert!(
+            err.to_string().contains("extraction budget"),
+            "expected extraction-budget error, got {err}"
+        );
     }
 
     #[test]

@@ -222,6 +222,14 @@ impl ContentAddressableStore {
     }
 
     /// Iterate over all stored hashes.
+    ///
+    /// Filters out files whose name is not a valid 64-char lowercase hex
+    /// string. The CAS layout writes content-addressed files with hex
+    /// names, but real filesystems also produce side files (`.DS_Store`,
+    /// `lost+found`, editor swap files, partial-rename leftovers).
+    /// Without this filter, `iter()` would return `ContentHash`es whose
+    /// `value` is junk text and downstream lookups would either fail or
+    /// — worse — pretend a junk file is a valid CAS entry.
     pub fn iter(&self) -> impl Iterator<Item = Result<ContentHash>> + '_ {
         walkdir::WalkDir::new(&self.root)
             .min_depth(2)
@@ -229,9 +237,17 @@ impl ContentAddressableStore {
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
-            .map(|e| {
-                let hash = e.file_name().to_string_lossy().to_string();
-                Ok(ContentHash::blake3(hash))
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    Some(Ok(ContentHash::blake3(name)))
+                } else {
+                    trace!(
+                        path = %e.path().display(),
+                        "Skipping non-hash file in CAS root"
+                    );
+                    None
+                }
             })
     }
 

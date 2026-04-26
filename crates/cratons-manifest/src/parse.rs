@@ -241,6 +241,7 @@ impl Manifest {
         self.build.dependencies.validate()?;
 
         if let Some(workspace) = &self.workspace {
+            workspace.validate()?;
             workspace.dependencies.validate()?;
         }
 
