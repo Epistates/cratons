@@ -69,6 +69,12 @@ pub enum SandboxError {
     /// Internal error.
     #[error("Internal sandbox error: {0}")]
     Internal(String),
+
+    /// Caller requested a feature the active sandbox backend cannot enforce.
+    /// Returned instead of silently degrading to a less-restrictive policy
+    /// (e.g. macOS sandbox-exec being asked for a per-host network allowlist).
+    #[error("Sandbox feature not supported by this backend: {0}")]
+    Unsupported(String),
 }
 
 impl SandboxError {

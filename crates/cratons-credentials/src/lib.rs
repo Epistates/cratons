@@ -6,7 +6,7 @@
 //! # Features
 //!
 //! - **System keychain integration**: Uses macOS Keychain, Windows Credential Manager,
-//!   or Linux Secret Service via the `keyring` crate
+//!   or Linux kernel keyrings via native `keyring-core` stores
 //! - **Secure memory handling**: All secrets use `secrecy::SecretString` with automatic
 //!   zeroization on drop
 //! - **Multiple storage backends**: Keychain, environment variables, encrypted files

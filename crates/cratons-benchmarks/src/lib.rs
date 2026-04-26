@@ -16,7 +16,7 @@
 use cratons_core::{ContentHash, Ecosystem};
 use cratons_lockfile::{DependencyRef, LockedPackage};
 use cratons_manifest::{Dependencies, Dependency, Manifest, Package};
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 
 /// Generate a small dependency tree (10 packages).
@@ -204,8 +204,8 @@ fn generate_package_deps(pkg_idx: usize, total_pkgs: usize) -> Vec<DependencyRef
 
 /// Generate random binary content for CAS benchmarks.
 pub fn generate_random_content(size: usize) -> Vec<u8> {
-    let mut rng = rand::thread_rng();
-    (0..size).map(|_| rng.r#gen()).collect()
+    let mut rng = rand::rng();
+    (0..size).map(|_| rng.random()).collect()
 }
 
 /// Generate file contents of various realistic sizes.

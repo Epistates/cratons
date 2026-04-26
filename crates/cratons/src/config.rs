@@ -202,6 +202,15 @@ pub struct SecurityConfig {
     pub strict_verification: bool,
     /// Vulnerability IDs to ignore
     pub ignore_vulns: Vec<String>,
+    /// Path to a Cedar policy file evaluated before every install and
+    /// during `cts audit`. Resolved through the same layered precedence
+    /// as the rest of the cratons config (system → user → project → env
+    /// → corp), so a platform team can deploy a fleet-wide policy under
+    /// `/etc/cratons/policy.toml`'s `[security]` block without touching
+    /// per-user files. When `None`, the legacy fallback of `./policy.cedar`
+    /// in the project directory is used if it exists; missing-file is
+    /// treated as "no policy configured" rather than a hard error.
+    pub policy_path: Option<PathBuf>,
 }
 
 impl Default for SecurityConfig {
@@ -210,6 +219,7 @@ impl Default for SecurityConfig {
             fail_on: "high".to_string(),
             strict_verification: false,
             ignore_vulns: Vec::new(),
+            policy_path: None,
         }
     }
 }
@@ -277,7 +287,7 @@ impl Config {
         // Track default keys
         let default_val = toml::to_string(&config)
             .ok()
-            .and_then(|s| s.parse::<toml::Value>().ok())
+            .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
             .unwrap_or(toml::Value::Table(toml::map::Map::new()));
         let default_keys = extract_present_keys(&default_val, "");
         for key in &default_keys {
@@ -286,43 +296,29 @@ impl Config {
 
         // Load from system config (lowest file precedence)
         #[cfg(unix)]
-        if let Some(system_config) = Self::load_file("/etc/cratons/config.toml") {
-            if let Ok(raw) = std::fs::read_to_string("/etc/cratons/config.toml") {
-                if let Ok(val) = raw.parse::<toml::Value>() {
-                    for key in extract_present_keys(&val, "") {
-                        sources.insert(key, ConfigSource::System);
-                    }
-                }
+        if let Some((system_config, keys)) = Self::load_file_with_keys("/etc/cratons/config.toml") {
+            for key in &keys {
+                sources.insert(key.clone(), ConfigSource::System);
             }
-            config = config.merge(system_config);
+            config = config.merge_present(system_config, &keys);
         }
 
         // Load from user config
         if let Some(user_config_path) = Self::user_config_path() {
-            if let Some(user_config) = Self::load_file(&user_config_path) {
-                if let Ok(raw) = std::fs::read_to_string(&user_config_path) {
-                    if let Ok(val) = raw.parse::<toml::Value>() {
-                        for key in extract_present_keys(&val, "") {
-                            sources.insert(key, ConfigSource::User);
-                        }
-                    }
+            if let Some((user_config, keys)) = Self::load_file_with_keys(&user_config_path) {
+                for key in &keys {
+                    sources.insert(key.clone(), ConfigSource::User);
                 }
-                config = config.merge(user_config);
+                config = config.merge_present(user_config, &keys);
             }
         }
 
         // Load from project config ([config] section of cratons.toml)
-        if let Some(project_config) = Self::load_project_config() {
-            if let Ok(raw) = std::fs::read_to_string("cratons.toml") {
-                if let Ok(manifest) = raw.parse::<toml::Value>() {
-                    if let Some(config_section) = manifest.get("config") {
-                        for key in extract_present_keys(config_section, "") {
-                            sources.insert(key, ConfigSource::Project);
-                        }
-                    }
-                }
+        if let Some((project_config, keys)) = Self::load_project_config_with_keys() {
+            for key in &keys {
+                sources.insert(key.clone(), ConfigSource::Project);
             }
-            config = config.merge(project_config);
+            config = config.merge_present(project_config, &keys);
         }
 
         // Apply environment variable overrides
@@ -334,17 +330,12 @@ impl Config {
         // Load corporate policy (wins all)
         let mut locked_keys = HashSet::new();
         if let Some(corp_path) = Self::corp_config_path() {
-            if let Some(corp_config) = Self::load_file(&corp_path) {
-                if let Ok(raw) = std::fs::read_to_string(&corp_path) {
-                    if let Ok(val) = raw.parse::<toml::Value>() {
-                        let corp_keys = extract_present_keys(&val, "");
-                        for key in &corp_keys {
-                            sources.insert(key.clone(), ConfigSource::Corp);
-                        }
-                        locked_keys = corp_keys;
-                    }
+            if let Some((corp_config, keys)) = Self::load_file_with_keys(&corp_path) {
+                for key in &keys {
+                    sources.insert(key.clone(), ConfigSource::Corp);
                 }
-                config = config.merge(corp_config);
+                locked_keys = keys.clone();
+                config = config.merge_present(corp_config, &keys);
             }
         }
 
@@ -405,20 +396,35 @@ impl Config {
     }
 
     /// Load configuration from a TOML file.
+    #[cfg(test)]
     fn load_file<P: AsRef<Path>>(path: P) -> Option<Self> {
+        Self::load_file_with_keys(path).map(|(config, _)| config)
+    }
+
+    /// Load configuration plus the TOML keys explicitly present in the file.
+    fn load_file_with_keys<P: AsRef<Path>>(path: P) -> Option<(Self, HashSet<String>)> {
         let path = path.as_ref();
         if !path.exists() {
             return None;
         }
 
         match std::fs::read_to_string(path) {
-            Ok(content) => match toml::from_str(&content) {
-                Ok(config) => Some(config),
-                Err(e) => {
-                    tracing::warn!("Failed to parse config file {}: {}", path.display(), e);
-                    None
+            Ok(content) => {
+                let keys = match toml::from_str::<toml::Value>(&content) {
+                    Ok(value) => extract_present_keys(&value, ""),
+                    Err(e) => {
+                        tracing::warn!("Failed to parse config file {}: {}", path.display(), e);
+                        return None;
+                    }
+                };
+                match toml::from_str(&content) {
+                    Ok(config) => Some((config, keys)),
+                    Err(e) => {
+                        tracing::warn!("Failed to parse config file {}: {}", path.display(), e);
+                        None
+                    }
                 }
-            },
+            }
             Err(e) => {
                 tracing::warn!("Failed to read config file {}: {}", path.display(), e);
                 None
@@ -427,7 +433,14 @@ impl Config {
     }
 
     /// Load `[config]` section from project cratons.toml.
+    #[cfg(test)]
+    #[allow(dead_code)]
     fn load_project_config() -> Option<Self> {
+        Self::load_project_config_with_keys().map(|(config, _)| config)
+    }
+
+    /// Load `[config]` section plus explicitly present keys from project cratons.toml.
+    fn load_project_config_with_keys() -> Option<(Self, HashSet<String>)> {
         let manifest_path = PathBuf::from("cratons.toml");
         if !manifest_path.exists() {
             return None;
@@ -438,11 +451,15 @@ impl Config {
 
         // Extract [config] section if present
         let config_section = manifest.get("config")?;
+        let keys = extract_present_keys(config_section, "");
         let config_str = toml::to_string(config_section).ok()?;
-        toml::from_str(&config_str).ok()
+        toml::from_str(&config_str)
+            .ok()
+            .map(|config| (config, keys))
     }
 
-    /// Merge another config into this one (other takes precedence).
+    /// Merge another config into this one (other takes precedence for all fields).
+    #[cfg(test)]
     fn merge(mut self, other: Self) -> Self {
         // Cache
         if other.cache.dir.is_some() {
@@ -477,6 +494,9 @@ impl Config {
         if !other.security.ignore_vulns.is_empty() {
             self.security.ignore_vulns = other.security.ignore_vulns;
         }
+        if other.security.policy_path.is_some() {
+            self.security.policy_path = other.security.policy_path;
+        }
 
         // Telemetry
         self.telemetry.enabled = other.telemetry.enabled;
@@ -499,6 +519,103 @@ impl Config {
             self.registry_policy.block = other.registry_policy.block;
         }
         if !other.registry_policy.access.is_empty() {
+            self.registry_policy
+                .access
+                .extend(other.registry_policy.access);
+        }
+
+        self
+    }
+
+    /// Merge another config into this one using only explicitly present keys.
+    fn merge_present(mut self, other: Self, keys: &HashSet<String>) -> Self {
+        let has = |key: &str| keys.contains(key);
+        let has_prefix = |prefix: &str| {
+            let dotted = format!("{prefix}.");
+            keys.iter()
+                .any(|key| key == prefix || key.starts_with(&dotted))
+        };
+
+        // Cache
+        if has("cache.dir") {
+            self.cache.dir = other.cache.dir;
+        }
+        if has_prefix("cache.remote") {
+            self.cache.remote = other.cache.remote;
+        }
+
+        // Install
+        if has("install.concurrency") {
+            self.install.concurrency = other.install.concurrency;
+        }
+        if has("install.run_scripts") {
+            self.install.run_scripts = other.install.run_scripts;
+        }
+        if has("install.strict_scripts") {
+            self.install.strict_scripts = other.install.strict_scripts;
+        }
+        if has("install.skip_integrity") {
+            self.install.skip_integrity = other.install.skip_integrity;
+        }
+
+        // Build
+        if has("build.memory_limit") {
+            self.build.memory_limit = other.build.memory_limit;
+        }
+        if has("build.cpu_limit") {
+            self.build.cpu_limit = other.build.cpu_limit;
+        }
+        if has("build.timeout") {
+            self.build.timeout = other.build.timeout;
+        }
+        if has("build.push_to_remote") {
+            self.build.push_to_remote = other.build.push_to_remote;
+        }
+        if has("build.max_parallel") {
+            self.build.max_parallel = other.build.max_parallel;
+        }
+
+        // Security
+        if has("security.fail_on") {
+            self.security.fail_on = other.security.fail_on;
+        }
+        if has("security.strict_verification") {
+            self.security.strict_verification = other.security.strict_verification;
+        }
+        if has("security.ignore_vulns") {
+            self.security.ignore_vulns = other.security.ignore_vulns;
+        }
+        if has("security.policy_path") {
+            self.security.policy_path = other.security.policy_path;
+        }
+
+        // Telemetry
+        if has("telemetry.enabled") {
+            self.telemetry.enabled = other.telemetry.enabled;
+        }
+        if has("telemetry.endpoint") {
+            self.telemetry.endpoint = other.telemetry.endpoint;
+        }
+        if has("telemetry.service_name") {
+            self.telemetry.service_name = other.telemetry.service_name;
+        }
+
+        // Registries
+        if has_prefix("registries") {
+            self.registries.extend(other.registries);
+        }
+
+        // Registry policy
+        if has("registry_policy.default") {
+            self.registry_policy.default = other.registry_policy.default;
+        }
+        if has("registry_policy.allow") {
+            self.registry_policy.allow = other.registry_policy.allow;
+        }
+        if has("registry_policy.block") {
+            self.registry_policy.block = other.registry_policy.block;
+        }
+        if has_prefix("registry_policy.access") {
             self.registry_policy
                 .access
                 .extend(other.registry_policy.access);
@@ -551,9 +668,17 @@ impl Config {
                 set_keys.push("install.concurrency".to_string());
             }
         }
+        if let Ok(val) = std::env::var("CRATONS_RUN_SCRIPTS") {
+            self.install.run_scripts = val == "1" || val.eq_ignore_ascii_case("true");
+            set_keys.push("install.run_scripts".to_string());
+        }
         if let Ok(val) = std::env::var("CRATONS_STRICT_SCRIPTS") {
             self.install.strict_scripts = val == "1" || val.eq_ignore_ascii_case("true");
             set_keys.push("install.strict_scripts".to_string());
+        }
+        if let Ok(val) = std::env::var("CRATONS_SKIP_INTEGRITY") {
+            self.install.skip_integrity = val == "1" || val.eq_ignore_ascii_case("true");
+            set_keys.push("install.skip_integrity".to_string());
         }
 
         // Build
@@ -582,6 +707,10 @@ impl Config {
         if let Ok(val) = std::env::var("CRATONS_STRICT_VERIFICATION") {
             self.security.strict_verification = val == "1" || val.eq_ignore_ascii_case("true");
             set_keys.push("security.strict_verification".to_string());
+        }
+        if let Ok(val) = std::env::var("CRATONS_POLICY_PATH") {
+            self.security.policy_path = Some(PathBuf::from(val));
+            set_keys.push("security.policy_path".to_string());
         }
 
         // Telemetry
@@ -727,6 +856,47 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_present_does_not_apply_defaults_from_absent_keys() {
+        let base = Config {
+            install: InstallConfig {
+                run_scripts: false,
+                strict_scripts: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let override_config = Config {
+            cache: CacheConfig {
+                dir: Some(PathBuf::from("/tmp/cratons-cache")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let keys = HashSet::from(["cache.dir".to_string()]);
+
+        let merged = base.merge_present(override_config, &keys);
+        assert_eq!(merged.cache.dir, Some(PathBuf::from("/tmp/cratons-cache")));
+        assert!(!merged.install.run_scripts);
+        assert!(merged.install.strict_scripts);
+    }
+
+    #[test]
+    fn test_merge_present_honors_explicit_false() {
+        let base = Config::default();
+        let override_config = Config {
+            install: InstallConfig {
+                run_scripts: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let keys = HashSet::from(["install.run_scripts".to_string()]);
+
+        let merged = base.merge_present(override_config, &keys);
+        assert!(!merged.install.run_scripts);
+    }
+
+    #[test]
     fn test_parse_toml() {
         let toml_str = r#"
             [install]
@@ -753,7 +923,7 @@ mod tests {
             [install]
             run_scripts = false
         "#;
-        let val: toml::Value = toml_str.parse().unwrap();
+        let val: toml::Value = toml::from_str(toml_str).unwrap();
         let keys = extract_present_keys(&val, "");
 
         assert!(keys.contains("security.fail_on"));
@@ -879,7 +1049,7 @@ run_scripts = false
 
         // Parse and extract keys
         let raw = std::fs::read_to_string(&corp_path).unwrap();
-        let val: toml::Value = raw.parse().unwrap();
+        let val: toml::Value = toml::from_str(&raw).unwrap();
         let locked = extract_present_keys(&val, "");
 
         assert!(locked.contains("security.fail_on"));

@@ -1,6 +1,6 @@
 //! OCI container-based sandbox implementation with seccomp enforcement.
 //!
-//! This module provides full OCI container isolation using libcontainer,
+//! This module generates OCI bundles and executes them with `crun` or `runc`,
 //! including proper seccomp syscall filtering.
 //!
 //! # Security Features
@@ -17,19 +17,19 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use libcontainer::container::builder::ContainerBuilder;
-use libcontainer::syscall::syscall::SyscallType;
 use oci_spec::runtime::{
-    LinuxBuilder, LinuxNamespaceBuilder, LinuxNamespaceType, LinuxResourcesBuilder, LinuxSeccomp,
-    MountBuilder, ProcessBuilder, RootBuilder, Spec, SpecBuilder, UserBuilder,
+    LinuxBuilder, LinuxCpuBuilder, LinuxMemoryBuilder, LinuxNamespaceBuilder, LinuxNamespaceType,
+    LinuxPidsBuilder, LinuxResourcesBuilder, MountBuilder, PosixRlimitBuilder, PosixRlimitType,
+    ProcessBuilder, RootBuilder, Spec, SpecBuilder, UserBuilder,
 };
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::config::{NetworkAccess, SandboxConfig};
 use crate::error::SandboxError;
-use crate::result::{ResourceUsage, SandboxResult};
+use crate::result::SandboxResult;
 use crate::seccomp::default_build_profile;
+use crate::{IsolationLevel, Sandbox};
 
 /// Container-based sandbox with full OCI compliance and seccomp enforcement.
 pub struct ContainerSandbox {
@@ -79,11 +79,18 @@ impl ContainerSandbox {
         tracing::Span::current().record("container_id", &container_id);
 
         let bundle_dir = self.state_dir.join(&container_id);
-        let rootfs_dir = bundle_dir.join("rootfs");
+        let managed_rootfs_dir = bundle_dir.join("rootfs");
+        let rootfs_dir = config
+            .rootfs
+            .clone()
+            .unwrap_or_else(|| managed_rootfs_dir.clone());
 
         // Create bundle structure
-        fs::create_dir_all(&rootfs_dir)?;
-        self.setup_rootfs(&rootfs_dir, config)?;
+        fs::create_dir_all(&bundle_dir)?;
+        if config.rootfs.is_none() {
+            fs::create_dir_all(&rootfs_dir)?;
+            self.setup_rootfs(&rootfs_dir, config)?;
+        }
 
         // Generate OCI spec with seccomp
         let spec = self.generate_spec(config, &rootfs_dir)?;
@@ -98,7 +105,7 @@ impl ContainerSandbox {
 
         let start = Instant::now();
 
-        // Execute using libcontainer
+        // Execute using the host OCI runtime
         let result = self.run_container(&container_id, &bundle_dir, config).await;
 
         let duration = start.elapsed();
@@ -148,7 +155,7 @@ impl ContainerSandbox {
     /// Generate OCI runtime spec with seccomp and all security features.
     fn generate_spec(&self, config: &SandboxConfig, rootfs: &Path) -> Result<Spec, SandboxError> {
         // Build process spec
-        let mut args: Vec<String> = config.command.clone();
+        let args = config.command.clone();
         if args.is_empty() {
             return Err(SandboxError::Config("Empty command".into()));
         }
@@ -159,7 +166,38 @@ impl ContainerSandbox {
             .map(|(k, v)| format!("{k}={v}"))
             .collect();
 
-        let process = ProcessBuilder::default()
+        // SECURITY: POSIX rlimits enforced on the process itself.
+        // Caps RLIMIT_FSIZE (max single-file size — prevents disk-fill DoS
+        // via one huge file) and RLIMIT_NOFILE (fd exhaustion DoS). Without
+        // these, `ResourceLimits::for_post_install`'s `nofile: Some(1024)`
+        // was a silent no-op on the crun/runc path.
+        let mut rlimits = Vec::new();
+        if let Some(fsize) = config.limits.fsize {
+            rlimits.push(
+                PosixRlimitBuilder::default()
+                    .typ(PosixRlimitType::RlimitFsize)
+                    .hard(fsize)
+                    .soft(fsize)
+                    .build()
+                    .map_err(|e| {
+                        SandboxError::Config(format!("Failed to build rlimit spec: {e}"))
+                    })?,
+            );
+        }
+        if let Some(nofile) = config.limits.nofile {
+            rlimits.push(
+                PosixRlimitBuilder::default()
+                    .typ(PosixRlimitType::RlimitNofile)
+                    .hard(nofile)
+                    .soft(nofile)
+                    .build()
+                    .map_err(|e| {
+                        SandboxError::Config(format!("Failed to build rlimit spec: {e}"))
+                    })?,
+            );
+        }
+
+        let mut process_builder = ProcessBuilder::default()
             .terminal(false)
             .user(
                 UserBuilder::default()
@@ -171,7 +209,11 @@ impl ContainerSandbox {
             .args(args)
             .env(env)
             .cwd("/work")
-            .no_new_privileges(true) // Critical: prevents privilege escalation
+            .no_new_privileges(true); // Critical: prevents privilege escalation
+        if !rlimits.is_empty() {
+            process_builder = process_builder.rlimits(rlimits);
+        }
+        let process = process_builder
             .build()
             .map_err(|e| SandboxError::Config(format!("Failed to build process spec: {e}")))?;
 
@@ -222,11 +264,47 @@ impl ContainerSandbox {
         // Get seccomp profile
         let seccomp = default_build_profile();
 
-        // Build resource limits if specified
+        // Build resource limits if specified.
+        //
+        // SECURITY: previously this block constructed an empty
+        // `LinuxResourcesBuilder` and silently dropped every limit —
+        // memory, cpu_shares, and pids were all ignored on the crun/runc
+        // path, which is the default Linux sandbox implementation. The
+        // fields on `ResourceLimits` existed only on the struct and were
+        // never propagated to the cgroup spec. Fixed: each limit is now
+        // wired through to `LinuxMemory` / `LinuxCpu` / `LinuxPids`.
         let resources =
-            if config.limits.memory.is_some() || config.limits.cpu_shares.is_some() {
+            if config.limits.memory.is_some()
+                || config.limits.cpu_shares.is_some()
+                || config.limits.pids.is_some()
+            {
                 let mut builder = LinuxResourcesBuilder::default();
-                // Add memory/CPU limits here if needed
+                if let Some(mem) = config.limits.memory {
+                    builder = builder.memory(
+                        LinuxMemoryBuilder::default()
+                            .limit(mem as i64)
+                            .build()
+                            .map_err(|e| {
+                                SandboxError::Config(format!("Failed to build memory spec: {e}"))
+                            })?,
+                    );
+                }
+                if let Some(shares) = config.limits.cpu_shares {
+                    builder =
+                        builder.cpu(LinuxCpuBuilder::default().shares(shares).build().map_err(
+                            |e| SandboxError::Config(format!("Failed to build cpu spec: {e}")),
+                        )?);
+                }
+                if let Some(pids) = config.limits.pids {
+                    builder = builder.pids(
+                        LinuxPidsBuilder::default()
+                            .limit(pids as i64)
+                            .build()
+                            .map_err(|e| {
+                                SandboxError::Config(format!("Failed to build pids spec: {e}"))
+                            })?,
+                    );
+                }
                 Some(builder.build().map_err(|e| {
                     SandboxError::Config(format!("Failed to build resource spec: {e}"))
                 })?)
@@ -322,10 +400,17 @@ impl ContainerSandbox {
                 .map_err(|e| SandboxError::Config(format!("Failed to build mount spec: {e}")))?,
         ];
 
-        // Build root
+        // Build root.
+        //
+        // SECURITY: the rootfs is mounted read-only so that a compromised
+        // build cannot mutate the toolchain image, which may be shared
+        // across many subsequent builds. All writable state lives under
+        // `/work` (bind-mounted rw above) and `/tmp` (tmpfs). This matches
+        // the posture enforced by `spec.rs`'s `OciSpecGenerator` so the two
+        // Linux codepaths behave consistently.
         let root = RootBuilder::default()
             .path(rootfs.to_string_lossy().to_string())
-            .readonly(false)
+            .readonly(true)
             .build()
             .map_err(|e| SandboxError::Config(format!("Failed to build root spec: {e}")))?;
 
@@ -370,22 +455,20 @@ impl ContainerSandbox {
         env
     }
 
-    /// Run the container using libcontainer.
+    /// Run the container using an external OCI runtime.
     async fn run_container(
         &self,
         container_id: &str,
         bundle_dir: &Path,
         config: &SandboxConfig,
     ) -> Result<SandboxResult, SandboxError> {
-        // For now, fall back to runc/crun if available, as libcontainer
-        // requires more complex setup for the init process
         if let Ok(runtime) = which::which("crun").or_else(|_| which::which("runc")) {
             return self
                 .run_with_runtime(&runtime, container_id, bundle_dir, config)
                 .await;
         }
 
-        Err(SandboxError::SandboxUnavailable(
+        Err(SandboxError::NotAvailable(
             "No OCI runtime (crun/runc) found. Install crun for full container support.".into(),
         ))
     }
@@ -412,9 +495,9 @@ impl ContainerSandbox {
 
         let start = Instant::now();
 
-        let child = cmd.spawn().map_err(|e| {
-            SandboxError::SandboxUnavailable(format!("Failed to spawn OCI runtime: {e}"))
-        })?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| SandboxError::NotAvailable(format!("Failed to spawn OCI runtime: {e}")))?;
 
         let output_result = if let Some(timeout_duration) = config.limits.timeout {
             match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
@@ -471,6 +554,25 @@ impl ContainerSandbox {
 impl Default for ContainerSandbox {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl Sandbox for ContainerSandbox {
+    async fn execute(&self, config: &SandboxConfig) -> Result<SandboxResult, SandboxError> {
+        ContainerSandbox::execute(self, config).await
+    }
+
+    fn isolation_level(&self) -> IsolationLevel {
+        IsolationLevel::Container
+    }
+
+    fn is_available(&self) -> bool {
+        Self::is_available()
+    }
+
+    fn description(&self) -> &'static str {
+        "OCI container sandbox (crun/runc)"
     }
 }
 

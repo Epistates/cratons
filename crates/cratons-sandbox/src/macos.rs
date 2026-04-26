@@ -11,17 +11,19 @@
 //! despite its deprecated status, as Apple provides no other mechanism for arbitrary child process restriction.
 //!
 //! ## Security Features (2025 Hardened)
-//! - Filesystem isolation via SBPL deny rules
+//! - Write isolation via SBPL deny rules
 //! - Network isolation (full deny or allow)
 //! - **Process execution restricted to whitelisted binaries**
 //! - **Environment variable sanitization**
 //! - Resource usage tracking via getrusage
 //!
 //! ## Limitations
-//! - Per-host network filtering not supported (AllowList falls back to Full)
+//! - Per-host network filtering not supported (AllowList is refused)
+//! - Read isolation is not complete enough to satisfy `SandboxPolicy::Required`
 //! - CPU/memory limits not supported by sandbox-exec (use timeout only)
 
 use std::io::Write;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Instant;
 
@@ -193,6 +195,28 @@ fn is_safe_env_var(name: &str) -> bool {
     name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn sbpl_string(value: &str) -> Result<String, SandboxError> {
+    if value.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(SandboxError::Config(format!(
+            "SBPL string contains a control character: {value:?}"
+        )));
+    }
+
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            _ => escaped.push(ch),
+        }
+    }
+    Ok(escaped)
+}
+
+fn sbpl_path(path: &Path) -> Result<String, SandboxError> {
+    sbpl_string(&path.to_string_lossy())
+}
+
 /// macOS sandbox using `sandbox-exec`.
 pub struct MacOsSandbox;
 
@@ -206,25 +230,65 @@ impl MacOsSandbox {
     /// Check if `sandbox-exec` is available.
     #[must_use]
     pub fn is_available() -> bool {
-        std::path::Path::new("/usr/bin/sandbox-exec").exists()
+        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+        *AVAILABLE.get_or_init(|| {
+            if !std::path::Path::new("/usr/bin/sandbox-exec").exists() {
+                return false;
+            }
+
+            let probe_config = SandboxConfig::new(vec!["/usr/bin/true".to_string()])
+                .with_workdir(std::path::PathBuf::from("/tmp"))
+                .with_network(NetworkAccess::None);
+            let sandbox = Self;
+            let profile_content = match sandbox.generate_profile(&probe_config) {
+                Ok(profile) => profile,
+                Err(_) => return false,
+            };
+
+            let mut profile_file = match NamedTempFile::new() {
+                Ok(file) => file,
+                Err(_) => return false,
+            };
+            if profile_file.write_all(profile_content.as_bytes()).is_err()
+                || profile_file.flush().is_err()
+            {
+                return false;
+            }
+
+            matches!(
+                std::process::Command::new("/usr/bin/sandbox-exec")
+                    .arg("-f")
+                    .arg(profile_file.path())
+                    .arg("/usr/bin/true")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status(),
+                Ok(status) if status.success()
+            )
+        })
     }
 
     /// Generate the SBPL (Sandbox Profile Language) profile.
     ///
     /// # Design Notes
     ///
-    /// macOS sandbox-exec is primarily designed to restrict WRITES, not reads.
-    /// The dynamic linker (dyld) requires broad read access to load executables.
-    /// Following Bazel's approach with 2025 security hardening:
-    /// 1. Allow all file reads (dyld, system libraries, etc. need this)
-    /// 2. Restrict file writes to specific directories (workdir, temp)
+    /// macOS sandbox-exec is best used as a write/network/process-exec
+    /// restriction layer. It cannot provide container-grade read isolation
+    /// or cgroup-style resource limits, so the crate-level capability
+    /// reporting deliberately does not advertise those guarantees.
+    ///
+    /// Profile posture:
+    /// 1. Allow reads from declared mounts and system runtime paths only.
+    /// 2. Restrict file writes to specific directories (workdir, temp).
     /// 3. **Restrict process execution to whitelisted binaries**
     /// 4. Optionally restrict network access
     ///
     /// This ensures hermetic builds by preventing actions from writing to
     /// unexpected locations or executing arbitrary code.
-    fn generate_profile(&self, config: &SandboxConfig) -> String {
-        let workdir = config.workdir.to_string_lossy();
+    fn generate_profile(&self, config: &SandboxConfig) -> Result<String, SandboxError> {
+        let workdir = sbpl_path(&config.workdir)?;
 
         let mut profile = String::from("(version 1)\n");
 
@@ -237,7 +301,10 @@ impl MacOsSandbox {
 
         // Allow specific system binaries
         for binary in ALLOWED_SYSTEM_BINARIES {
-            profile.push_str(&format!("(allow process-exec (literal \"{binary}\"))\n"));
+            profile.push_str(&format!(
+                "(allow process-exec (literal \"{}\"))\n",
+                sbpl_string(binary)?
+            ));
         }
 
         // SECURITY: Only allow network tools when network access is enabled
@@ -245,7 +312,10 @@ impl MacOsSandbox {
         let network_enabled = !matches!(&config.network, NetworkAccess::None);
         if network_enabled {
             for binary in NETWORK_BINARIES {
-                profile.push_str(&format!("(allow process-exec (literal \"{binary}\"))\n"));
+                profile.push_str(&format!(
+                    "(allow process-exec (literal \"{}\"))\n",
+                    sbpl_string(binary)?
+                ));
             }
             debug!("Network enabled: allowing network binaries");
         } else {
@@ -255,25 +325,33 @@ impl MacOsSandbox {
         // Allow execution from approved directories (for toolchains installed there)
         // NOTE: This is intentionally restricted to Apple-signed paths only
         for path in ALLOWED_EXEC_PATHS {
-            profile.push_str(&format!("(allow process-exec (subpath \"{path}\"))\n"));
+            profile.push_str(&format!(
+                "(allow process-exec (subpath \"{}\"))\n",
+                sbpl_string(path)?
+            ));
         }
 
-        // Allow execution from additional toolchain paths if specified in config
+        // Allow execution from explicitly-declared toolchain mounts.
+        //
+        // SECURITY: previously this iterated `config.ro_mounts` and granted
+        // `process-exec` to any mount whose source path *contained the
+        // substring* "toolchain", "sdk", "node", "python", "rust", or "go".
+        // That heuristic was attacker-controllable: a malicious package or
+        // caller could declare a mount like `/tmp/toolchain/evil` and have
+        // it auto-allowlisted for execution, defeating `(deny default)`.
+        // The allowlist now requires an explicit opt-in via the dedicated
+        // `Mount.allow_exec` field, so the decision is data-driven from
+        // operator-controlled config rather than inferred from path strings.
         for mount in &config.ro_mounts {
-            // If a read-only mount looks like a toolchain directory, allow execution
-            let mount_path = mount.source.to_string_lossy();
-            if mount_path.contains("toolchain")
-                || mount_path.contains("sdk")
-                || mount_path.contains("node")
-                || mount_path.contains("python")
-                || mount_path.contains("rust")
-                || mount_path.contains("go")
-            {
+            if mount.allow_exec {
                 profile.push_str(&format!(
                     "(allow process-exec (subpath \"{}\"))\n",
-                    mount_path
+                    sbpl_path(&mount.source)?
                 ));
-                debug!("Allowing execution from toolchain mount: {}", mount_path);
+                debug!(
+                    "Allowing execution from explicitly-declared exec mount: {}",
+                    mount.source.display()
+                );
             }
         }
 
@@ -286,10 +364,47 @@ impl MacOsSandbox {
         profile.push_str("(allow sysctl*)\n");
         profile.push_str("(allow mach*)\n");
 
-        // Allow ALL file reads - dyld and system libraries require broad read access
-        // This is consistent with Bazel's macOS sandbox approach
+        // Allow reads from declared inputs and system runtime paths. This
+        // avoids exposing the caller's home directory and credential files
+        // via an unconditional `(allow file-read*)`.
         profile.push_str("\n; File access\n");
-        profile.push_str("(allow file-read*)\n");
+        profile.push_str("(allow file-read-metadata)\n");
+        for path in ALLOWED_EXEC_PATHS {
+            profile.push_str(&format!(
+                "(allow file-read* (subpath \"{}\"))\n",
+                sbpl_string(path)?
+            ));
+        }
+        for binary in ALLOWED_SYSTEM_BINARIES {
+            profile.push_str(&format!(
+                "(allow file-read* (literal \"{}\"))\n",
+                sbpl_string(binary)?
+            ));
+        }
+        if network_enabled {
+            for binary in NETWORK_BINARIES {
+                profile.push_str(&format!(
+                    "(allow file-read* (literal \"{}\"))\n",
+                    sbpl_string(binary)?
+                ));
+            }
+        }
+        profile.push_str("(allow file-read* (subpath \"/System\"))\n");
+        profile.push_str("(allow file-read* (subpath \"/usr/lib\"))\n");
+        profile.push_str("(allow file-read* (subpath \"/Library/Apple\"))\n");
+        profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", workdir));
+        for mount in &config.ro_mounts {
+            profile.push_str(&format!(
+                "(allow file-read* (subpath \"{}\"))\n",
+                sbpl_path(&mount.source)?
+            ));
+        }
+        for mount in &config.rw_mounts {
+            profile.push_str(&format!(
+                "(allow file-read* (subpath \"{}\"))\n",
+                sbpl_path(&mount.source)?
+            ));
+        }
 
         // Restrict file writes to specific directories only
         // This is the primary isolation mechanism on macOS
@@ -307,7 +422,7 @@ impl MacOsSandbox {
         for mount in &config.rw_mounts {
             profile.push_str(&format!(
                 "(allow file-write* (subpath \"{}\"))\n",
-                mount.source.to_string_lossy()
+                sbpl_path(&mount.source)?
             ));
         }
 
@@ -324,13 +439,25 @@ impl MacOsSandbox {
                 profile.push_str("(deny network*)\n");
             }
             NetworkAccess::AllowList(hosts) => {
-                // SBPL doesn't support per-host filtering well
-                // Log warning and fall back to Full
-                warn!(
-                    hosts = ?hosts,
-                    "macOS sandbox-exec does not support per-host network filtering, allowing full network"
-                );
-                profile.push_str("(allow network*)\n");
+                // SECURITY: SBPL has no per-host network filtering primitive,
+                // so we cannot honor `AllowList` faithfully. The previous
+                // behavior was to log a warning and silently degrade to
+                // `(allow network*)` — full unrestricted network — which
+                // turned a stricter caller request into a *less* restrictive
+                // sandbox without surfacing the change. That is a data
+                // exfiltration foot-gun: a caller that asks for "only
+                // example.com" gets unrestricted egress instead.
+                //
+                // We now fail closed: callers must explicitly choose between
+                // `Full` (accept unrestricted egress) and `None`/`LocalhostOnly`
+                // (accept stricter-than-requested isolation).
+                return Err(SandboxError::Unsupported(format!(
+                    "macOS sandbox-exec cannot enforce per-host network allowlists; \
+                     refusing to silently degrade to full network access. \
+                     Requested allowlist: {hosts:?}. Use NetworkAccess::Full to \
+                     opt in explicitly, or NetworkAccess::None / LocalhostOnly \
+                     for stricter isolation."
+                )));
             }
             NetworkAccess::Full => {
                 profile.push_str("(allow network*)\n");
@@ -344,7 +471,7 @@ impl MacOsSandbox {
             "Generated hardened SBPL profile"
         );
 
-        profile
+        Ok(profile)
     }
 }
 
@@ -359,6 +486,12 @@ impl Sandbox for MacOsSandbox {
     async fn execute(&self, config: &SandboxConfig) -> Result<SandboxResult, SandboxError> {
         validate_config(config)?;
 
+        if !Self::is_available() {
+            return Err(SandboxError::NotAvailable(
+                "sandbox-exec is not available or the OS denied sandbox_apply".to_string(),
+            ));
+        }
+
         // Log warnings for unsupported features
         if config.limits.memory.is_some() || config.limits.cpu_shares.is_some() {
             warn!(
@@ -369,7 +502,7 @@ impl Sandbox for MacOsSandbox {
         // 1. Write profile to temporary file
         // Keep _profile_file in scope so it doesn't get deleted
         let mut profile_file = NamedTempFile::new().map_err(SandboxError::Io)?;
-        let profile_content = self.generate_profile(config);
+        let profile_content = self.generate_profile(config)?;
         profile_file
             .write_all(profile_content.as_bytes())
             .map_err(SandboxError::Io)?;
@@ -480,7 +613,7 @@ impl Sandbox for MacOsSandbox {
     }
 
     fn description(&self) -> &'static str {
-        "macOS sandbox-exec (Apple Sandbox Profile Language, filesystem/network isolation)"
+        "macOS sandbox-exec (Apple Sandbox Profile Language, network/write/process isolation)"
     }
 }
 
@@ -657,12 +790,75 @@ mod tests {
             .with_workdir(PathBuf::from("/tmp"))
             .with_network(NetworkAccess::None);
 
-        let profile = sandbox.generate_profile(&config);
+        let profile = sandbox.generate_profile(&config).unwrap();
         assert!(profile.contains("(version 1)"));
         assert!(profile.contains("(deny default)"));
-        assert!(profile.contains("(allow file-read*)"));
+        assert!(!profile.contains("(allow file-read*)\n"));
+        assert!(profile.contains("(allow file-read-metadata)"));
         assert!(profile.contains("(allow file-write* (subpath \"/tmp\"))"));
         assert!(profile.contains("(deny network*)"));
+    }
+
+    #[test]
+    fn allowlist_network_returns_unsupported_instead_of_silent_full() {
+        let sandbox = MacOsSandbox::new();
+        let config = SandboxConfig::new(vec!["echo".into()])
+            .with_workdir(PathBuf::from("/tmp"))
+            .with_network(NetworkAccess::AllowList(vec!["example.com".into()]));
+        let err = sandbox
+            .generate_profile(&config)
+            .expect_err("AllowList must be refused on macOS, not silently degraded");
+        assert!(
+            matches!(err, SandboxError::Unsupported(_)),
+            "expected SandboxError::Unsupported, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn ro_mount_does_not_grant_exec_unless_allow_exec_set() {
+        let sandbox = MacOsSandbox::new();
+        let config = SandboxConfig::new(vec!["echo".into()])
+            .with_workdir(PathBuf::from("/tmp"))
+            .with_network(NetworkAccess::None)
+            .with_ro_mount(crate::config::Mount::readonly(
+                PathBuf::from("/tmp/toolchain/evil"),
+                PathBuf::from("/opt/toolchain/evil"),
+            ));
+        let profile = sandbox.generate_profile(&config).unwrap();
+        // Path-substring heuristic must be gone: a mount whose source
+        // contains "toolchain" must NOT auto-allowlist process-exec.
+        assert!(
+            !profile.contains("(allow process-exec (subpath \"/tmp/toolchain/evil\"))"),
+            "ro_mount path leaked into exec allowlist via substring heuristic:\n{profile}"
+        );
+    }
+
+    #[test]
+    fn sbpl_profile_escapes_dynamic_paths() {
+        let sandbox = MacOsSandbox::new();
+        let config = SandboxConfig::new(vec!["echo".into()])
+            .with_workdir(PathBuf::from("/tmp/cratons\"quoted"))
+            .with_network(NetworkAccess::None);
+
+        let profile = sandbox.generate_profile(&config).unwrap();
+        assert!(profile.contains("/tmp/cratons\\\"quoted"));
+    }
+
+    #[test]
+    fn ro_mount_grants_exec_when_allow_exec_set() {
+        let sandbox = MacOsSandbox::new();
+        let config = SandboxConfig::new(vec!["echo".into()])
+            .with_workdir(PathBuf::from("/tmp"))
+            .with_network(NetworkAccess::None)
+            .with_ro_mount(crate::config::Mount::readonly_executable(
+                PathBuf::from("/opt/trusted-toolchain"),
+                PathBuf::from("/opt/trusted-toolchain"),
+            ));
+        let profile = sandbox.generate_profile(&config).unwrap();
+        assert!(
+            profile.contains("(allow process-exec (subpath \"/opt/trusted-toolchain\"))"),
+            "explicit allow_exec mount should be exec-allowed in SBPL profile:\n{profile}"
+        );
     }
 
     #[test]

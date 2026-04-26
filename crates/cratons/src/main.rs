@@ -314,8 +314,21 @@ enum CacheCommands {
 fn main() {
     let cli = Cli::parse();
 
-    // Initialize observability
-    let obs_config = observability::ObservabilityConfig::from_flags(cli.verbose, cli.quiet);
+    // Initialize observability.
+    //
+    // Load the layered cratons config so the `[telemetry]` block (and any
+    // corp-policy override of it) actually reaches the observability stack.
+    // Previously `observability::init` was called with only the CLI flags
+    // and the `[telemetry]` settings in `/etc/cratons/config.toml` were
+    // silently ignored — an SRE who set `endpoint = "..."` in policy
+    // would get no traces.
+    let app_config = config::Config::load();
+    let mut obs_config = observability::ObservabilityConfig::from_flags(cli.verbose, cli.quiet);
+    obs_config.telemetry = Some(observability::TelemetrySettings {
+        enabled: app_config.telemetry.enabled,
+        endpoint: app_config.telemetry.endpoint.clone(),
+        service_name: app_config.telemetry.service_name.clone(),
+    });
     if let Err(e) = observability::init(obs_config) {
         eprintln!("warning: failed to initialize logging: {}", e);
     }

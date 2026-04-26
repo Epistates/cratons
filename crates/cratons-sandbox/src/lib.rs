@@ -81,7 +81,7 @@ impl IsolationLevel {
     /// Check if this isolation level provides filesystem isolation.
     #[must_use]
     pub fn has_filesystem_isolation(&self) -> bool {
-        matches!(self, Self::Container | Self::Vm | Self::OsSandbox)
+        matches!(self, Self::Container | Self::Vm)
     }
 
     /// Check if this isolation level provides network isolation.
@@ -99,7 +99,7 @@ impl IsolationLevel {
     /// Check if this isolation level provides resource limits.
     #[must_use]
     pub fn has_resource_limits(&self) -> bool {
-        matches!(self, Self::Container | Self::Vm | Self::OsSandbox)
+        matches!(self, Self::Container | Self::Vm)
     }
 }
 
@@ -281,12 +281,12 @@ mod tests {
         assert!(IsolationLevel::Vm.has_network_isolation());
         assert!(IsolationLevel::Vm.has_resource_limits());
 
-        assert!(IsolationLevel::OsSandbox.has_filesystem_isolation());
+        assert!(!IsolationLevel::OsSandbox.has_filesystem_isolation());
         // OsSandbox now reports network isolation because macOS
         // `sandbox-exec` enforces `(deny network*)` via SBPL (Phase 3
         // plat­form correction).
         assert!(IsolationLevel::OsSandbox.has_network_isolation());
-        assert!(IsolationLevel::OsSandbox.has_resource_limits());
+        assert!(!IsolationLevel::OsSandbox.has_resource_limits());
 
         assert!(!IsolationLevel::Process.has_filesystem_isolation());
         assert!(!IsolationLevel::Process.has_network_isolation());

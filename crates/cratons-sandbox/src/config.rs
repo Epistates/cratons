@@ -144,16 +144,35 @@ pub struct Mount {
     pub target: PathBuf,
     /// Whether this mount is read-only.
     pub readonly: bool,
+    /// Whether binaries inside this mount may be `exec`'d by the sandboxed
+    /// process. Defaults to `false` so that data mounts and untrusted
+    /// content cannot be used to escape an exec allowlist (macOS SBPL,
+    /// Linux noexec policies). Set to `true` only for explicitly trusted
+    /// toolchain mounts.
+    pub allow_exec: bool,
 }
 
 impl Mount {
-    /// Create a new read-only mount.
+    /// Create a new read-only mount. `allow_exec` defaults to `false`.
     #[must_use]
     pub fn readonly(source: PathBuf, target: PathBuf) -> Self {
         Self {
             source,
             target,
             readonly: true,
+            allow_exec: false,
+        }
+    }
+
+    /// Create a new read-only toolchain mount whose contents are
+    /// explicitly trusted to be executed by the sandboxed process.
+    #[must_use]
+    pub fn readonly_executable(source: PathBuf, target: PathBuf) -> Self {
+        Self {
+            source,
+            target,
+            readonly: true,
+            allow_exec: true,
         }
     }
 
@@ -164,6 +183,7 @@ impl Mount {
             source,
             target,
             readonly: false,
+            allow_exec: false,
         }
     }
 
@@ -174,6 +194,7 @@ impl Mount {
             source: path.clone(),
             target: path,
             readonly,
+            allow_exec: false,
         }
     }
 }
@@ -186,7 +207,7 @@ impl Mount {
 /// |------|-------|-------|---------|
 /// | `None` | Full | Full | Partial |
 /// | `LocalhostOnly` | Full | Full | Partial |
-/// | `AllowList` | Full (iptables) | Falls back to `LocalhostOnly` | Not supported |
+/// | `AllowList` | Full (iptables) | Refused (use `Full` or `LocalhostOnly`) | Not supported |
 /// | `Full` | Full | Full | Full |
 ///
 /// On macOS, per-host filtering is not supported by the sandbox-exec SBPL.
@@ -201,7 +222,9 @@ pub enum NetworkAccess {
     /// Useful for local tooling, databases, or services.
     LocalhostOnly,
     /// Allow access to specific hosts only.
-    /// Note: Falls back to `LocalhostOnly` on macOS.
+    /// Note: macOS sandbox-exec cannot enforce this; the macOS backend
+    /// returns `SandboxError::Unsupported` rather than silently
+    /// degrading to a less-restrictive policy.
     AllowList(Vec<String>),
     /// Full network access.
     Full,

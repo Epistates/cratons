@@ -30,7 +30,7 @@ toml = { workspace = true }
 tempfile = { workspace = true }
 
 # Random data generation
-rand = "0.8"
+rand = "0.10"
 
 [dev-dependencies]
 # Criterion benchmarking with async support

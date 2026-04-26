@@ -22,8 +22,8 @@ tracing = { workspace = true }
 fs2 = "0.4"
 tempfile = { workspace = true }
 # Cryptographic signatures for lockfile integrity
-ed25519-dalek = { version = "2.1", features = ["rand_core"] }
-rand = "0.8"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+rand = "0.10"
 base64 = "0.22"
 # Constant-time comparison for signature verification
 subtle = { workspace = true }

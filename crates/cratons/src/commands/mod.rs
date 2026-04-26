@@ -74,6 +74,37 @@ description = ""
     Ok(())
 }
 
+fn severity_score(severity: cratons_security::Severity) -> i64 {
+    match severity {
+        cratons_security::Severity::Low => 1,
+        cratons_security::Severity::Medium => 2,
+        cratons_security::Severity::High => 3,
+        cratons_security::Severity::Critical => 4,
+    }
+}
+
+fn vulnerability_context_by_package(
+    audit: &cratons_security::AuditResult,
+) -> std::collections::HashMap<(String, Ecosystem), (Vec<String>, i64)> {
+    let mut context: std::collections::HashMap<(String, Ecosystem), (Vec<String>, i64)> =
+        std::collections::HashMap::new();
+
+    for vuln in &audit.vulnerabilities {
+        let entry = context
+            .entry((vuln.package.clone(), vuln.ecosystem))
+            .or_insert_with(|| (Vec::new(), 0));
+        entry.0.push(vuln.id.clone());
+        entry.1 = entry.1.max(severity_score(vuln.severity));
+    }
+
+    for (ids, _) in context.values_mut() {
+        ids.sort();
+        ids.dedup();
+    }
+
+    context
+}
+
 /// Add dependencies.
 pub fn add(deps: &[String], dev: bool, _build: bool) -> Result<()> {
     let (mut manifest, manifest_path) =
@@ -379,6 +410,110 @@ async fn install_async(
         return Ok(());
     }
 
+    let app_config = crate::config::Config::load();
+
+    // SECURITY: pre-install Cedar policy gate.
+    //
+    // Before any bytes are downloaded or scripts are run, evaluate the
+    // resolved lockfile against the operator-supplied Cedar policy. The
+    // policy path is resolved through the layered config (corp →
+    // env → project → user → system → default), with `./policy.cedar`
+    // as the legacy fallback when no key is configured. Missing-file is
+    // treated as "no policy configured" rather than a hard error so that
+    // projects without security-as-code aren't broken.
+    //
+    // Previously this engine was only invoked from `cts audit`, which is
+    // an explicit follow-up step, so an operator who wrote
+    // `forbid(... ecosystem == "go" ...)` expected installs to fail and
+    // got silent acceptance. Wiring the gate here closes that gap.
+    {
+        use cratons_security::{Auditor, policy::PolicyEngine};
+        let configured = app_config.security.policy_path.clone();
+        let policy_path = match configured {
+            Some(p) => Some(p),
+            None => {
+                let legacy = project_dir.join("policy.cedar");
+                if legacy.exists() { Some(legacy) } else { None }
+            }
+        };
+        if let Some(path) = policy_path {
+            if !path.exists() {
+                return Err(miette::miette!(
+                    "security.policy_path is set to {} but the file does not exist",
+                    path.display()
+                ));
+            }
+            println!(
+                "{} Evaluating security policy from {}",
+                "→".blue(),
+                path.display()
+            );
+            let engine = PolicyEngine::load(&path)
+                .map_err(|e| miette::miette!("Failed to load security policy: {}", e))?;
+
+            println!(
+                "{} Querying vulnerability intelligence for policy",
+                "→".blue()
+            );
+            let audit = Auditor::new()
+                .audit(&lockfile)
+                .await
+                .map_err(|e| miette::miette!("Pre-install vulnerability audit failed: {}", e))?;
+            if !audit.failed_packages.is_empty() {
+                return Err(miette::miette!(
+                    "Install aborted: vulnerability audit failed for package(s): {}",
+                    audit.failed_packages.join(", ")
+                ));
+            }
+            let vulnerability_context = vulnerability_context_by_package(&audit);
+
+            let mut denied: Vec<String> = Vec::new();
+            for pkg in &lockfile.packages {
+                let key = (pkg.name.clone(), pkg.ecosystem);
+                let (vulnerabilities, max_severity) = vulnerability_context
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| (Vec::new(), 0));
+                let decision = engine
+                    .check_pre_install(
+                        &pkg.name,
+                        &pkg.version,
+                        pkg.ecosystem,
+                        &vulnerabilities,
+                        max_severity,
+                    )
+                    .map_err(|e| {
+                        miette::miette!(
+                            "Policy evaluation failed for {}@{}: {}",
+                            pkg.name,
+                            pkg.version,
+                            e
+                        )
+                    })?;
+                if let Some(violation) = decision {
+                    denied.push(format!(
+                        "{}@{} ({}): {}",
+                        violation.package,
+                        violation.version,
+                        pkg.ecosystem,
+                        violation.reasons.join(", ")
+                    ));
+                }
+            }
+            if !denied.is_empty() {
+                println!("{} Pre-install policy violations:", "!".red());
+                for line in &denied {
+                    println!("  {} {}", "×".red(), line);
+                }
+                return Err(miette::miette!(
+                    "Install aborted: {} package(s) denied by security policy",
+                    denied.len()
+                ));
+            }
+            println!("{} Pre-install policy check passed", "✓".green());
+        }
+    }
+
     // Create progress bar
     let pb = ProgressBar::new(package_count as u64);
     pb.set_style(
@@ -396,16 +531,18 @@ async fn install_async(
     // post-F-final. Maven PGP trust is loaded from the manifest's
     // `[security.maven]` section (F-2c) falling back to the user-level
     // keyring at `~/.config/cratons/trusted-keys/maven.toml`.
-    let config = InstallerConfig {
-        concurrency: 8,
-        run_scripts: true,
-        strict_scripts: false, // Don't fail on script errors by default
-        sandbox_policy,
-        integrity_policy: cratons_installer::IntegrityPolicy::default(),
-        link_strategy: LinkStrategy::Symlink,
-        ecosystems: None, // Install all ecosystems
-        ..InstallerConfig::from_manifest(&manifest)
+    let mut config = InstallerConfig::from_manifest(&manifest);
+    config.concurrency = app_config.install.concurrency.max(1);
+    config.run_scripts = app_config.install.run_scripts;
+    config.strict_scripts = app_config.install.strict_scripts;
+    config.sandbox_policy = sandbox_policy;
+    config.integrity_policy = if app_config.install.skip_integrity {
+        cratons_installer::IntegrityPolicy::Skip
+    } else {
+        cratons_installer::IntegrityPolicy::default()
     };
+    config.link_strategy = LinkStrategy::Symlink;
+    config.ecosystems = None; // Install all ecosystems
 
     // Run installation
     let installer = cratons_installer::Installer::with_config(&store, config);
@@ -765,19 +902,19 @@ async fn exec_async(package: &str, args: &[String], offline: bool) -> Result<()>
     let store =
         Store::open_default().map_err(|e| miette::miette!("Failed to open store: {}", e))?;
 
-    // Transient exec installs use the default (fail-closed) sandbox policy
-    // and the default integrity policy. Operators can relax either via the
-    // main `install` command; `exec` is intentionally strict.
-    let config = InstallerConfig {
-        concurrency: 4,
-        run_scripts: true,
-        strict_scripts: false,
-        sandbox_policy: cratons_installer::SandboxPolicy::default(),
-        integrity_policy: cratons_installer::IntegrityPolicy::default(),
-        link_strategy: LinkStrategy::Symlink,
-        ecosystems: None,
-        ..InstallerConfig::default()
+    let app_config = crate::config::Config::load();
+    let mut config = InstallerConfig::default();
+    config.concurrency = app_config.install.concurrency.max(1);
+    config.run_scripts = app_config.install.run_scripts;
+    config.strict_scripts = app_config.install.strict_scripts;
+    config.sandbox_policy = cratons_installer::SandboxPolicy::default();
+    config.integrity_policy = if app_config.install.skip_integrity {
+        cratons_installer::IntegrityPolicy::Skip
+    } else {
+        cratons_installer::IntegrityPolicy::default()
     };
+    config.link_strategy = LinkStrategy::Symlink;
+    config.ecosystems = None;
 
     let installer = cratons_installer::Installer::with_config(&store, config);
     installer
@@ -1904,20 +2041,39 @@ async fn audit_async(fail_on: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Check for policy file
-    let policy_path = Path::new("policy.cedar");
-    let policy = if policy_path.exists() {
-        println!(
-            "{} Loading security policy from {}",
-            "→".blue(),
-            policy_path.display()
-        );
-        Some(
-            PolicyEngine::load(policy_path)
-                .map_err(|e| miette::miette!("Failed to load policy: {}", e))?,
-        )
-    } else {
-        None
+    // Check for policy file. Resolved from `security.policy_path` (layered
+    // config: corp → env → project → user → system → default), with
+    // `./policy.cedar` as the legacy fallback when no key is configured.
+    // This is the same resolution used by `install_async`'s pre-install
+    // gate, so `cts audit` and `cts install` evaluate identical inputs.
+    let app_config = crate::config::Config::load();
+    let configured = app_config.security.policy_path.clone();
+    let policy_path: Option<std::path::PathBuf> = match configured {
+        Some(p) => Some(p),
+        None => {
+            let legacy = std::path::PathBuf::from("policy.cedar");
+            if legacy.exists() { Some(legacy) } else { None }
+        }
+    };
+    let policy = match policy_path {
+        Some(path) if path.exists() => {
+            println!(
+                "{} Loading security policy from {}",
+                "→".blue(),
+                path.display()
+            );
+            Some(
+                PolicyEngine::load(&path)
+                    .map_err(|e| miette::miette!("Failed to load policy: {}", e))?,
+            )
+        }
+        Some(path) => {
+            return Err(miette::miette!(
+                "security.policy_path is set to {} but the file does not exist",
+                path.display()
+            ));
+        }
+        None => None,
     };
 
     println!(

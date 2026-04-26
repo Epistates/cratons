@@ -12,7 +12,7 @@ readme.workspace = true
 
 [dependencies]
 # Cross-platform keychain access
-keyring = "3"
+keyring-core = { workspace = true }
 
 # Secret management with automatic zeroization
 secrecy = { version = "0.10", features = ["serde"] }
@@ -32,11 +32,20 @@ thiserror = "2"
 # Encryption for file-based storage
 aes-gcm = "0.10"
 argon2 = "0.5"
-rand = "0.8"
+rand = "0.10"
 base64 = "0.22"
 
 # Tracing
 tracing = "0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-keyutils-keyring-store = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -8,8 +8,14 @@ use futures::stream::{self, StreamExt};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
+
+/// Hard upper bound for one package artifact download.
+///
+/// Most registry artifacts are far smaller. The cap prevents a malicious
+/// registry, mirror, or proxy from forcing the installer to buffer unbounded
+/// response bodies in memory before integrity verification can run.
+const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Per-download result carrying the stored artifact path, byte count,
 /// and any PGP trust-on-first-use pin that should be recorded into the
@@ -101,7 +107,10 @@ impl PackageDownloader {
     async fn keystore(&self) -> Result<&cratons_security::KeyStore> {
         self.maven_keystore
             .get_or_try_init(|| async {
-                cratons_security::KeyStore::open_default(self.client.clone())
+                cratons_security::KeyStore::open_with_keyservers(
+                    self.client.clone(),
+                    self.maven_trust.effective_keyservers(),
+                )
             })
             .await
     }
@@ -337,10 +346,29 @@ impl PackageDownloader {
             )));
         }
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| CratonsError::Network(format!("Failed to read response: {}", e)))?;
+        if let Some(content_length) = response.content_length() {
+            if content_length > MAX_DOWNLOAD_BYTES {
+                return Err(CratonsError::Network(format!(
+                    "Refusing to download {}: Content-Length {} exceeds maximum {} bytes",
+                    pkg.name, content_length, MAX_DOWNLOAD_BYTES
+                )));
+            }
+        }
+
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk
+                .map_err(|e| CratonsError::Network(format!("Failed to read response: {}", e)))?;
+            let next_len = bytes.len() as u64 + chunk.len() as u64;
+            if next_len > MAX_DOWNLOAD_BYTES {
+                return Err(CratonsError::Network(format!(
+                    "Refusing to download {}: response exceeded maximum {} bytes",
+                    pkg.name, MAX_DOWNLOAD_BYTES
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
 
         let bytes_downloaded = bytes.len() as u64;
         diag.actual_bytes = bytes_downloaded;
@@ -419,12 +447,11 @@ impl PackageDownloader {
         packages: &[&LockedPackage],
         store: &Store,
     ) -> Result<Vec<DownloadResult>> {
-        let semaphore = Arc::new(Semaphore::new(self.concurrency));
+        let concurrency = self.concurrency.max(1);
 
         let downloads: Vec<_> = packages
             .iter()
             .map(|pkg| {
-                let semaphore = Arc::clone(&semaphore);
                 let client = self.client.clone();
                 let pkg = (*pkg).clone();
                 let store_root = store.root().to_path_buf();
@@ -433,10 +460,6 @@ impl PackageDownloader {
                 let keystore = Arc::clone(&self.maven_keystore);
 
                 async move {
-                    let _permit = semaphore.acquire().await.map_err(|_| {
-                        CratonsError::Config("Download semaphore closed unexpectedly".into())
-                    })?;
-
                     // Re-create downloader for this task, preserving the
                     // F-2c trust state.
                     let downloader = PackageDownloader {
@@ -458,7 +481,11 @@ impl PackageDownloader {
             .collect();
 
         let results: Vec<Result<DownloadResult>> = stream::iter(downloads)
-            .buffer_unordered(self.concurrency)
+            // `buffered` preserves input order while still executing up to
+            // `concurrency` downloads at a time. The installer zips this Vec
+            // back against the input package slice, so completion-order
+            // collection would corrupt package/result association.
+            .buffered(concurrency)
             .collect()
             .await;
 
@@ -541,7 +568,15 @@ impl PackageDownloader {
             return Ok(());
         }
 
-        // Parse integrity format: "algorithm-base64hash"
+        // Parse integrity format: "algorithm-base64hash".
+        //
+        // SECURITY: an unknown prefix MUST be a hard error. Silently accepting
+        // an unrecognized algorithm allows an attacker who controls the
+        // lockfile `integrity` field (e.g. via a mirror substitution or a
+        // malicious PR) to bypass verification entirely by setting a bogus
+        // prefix like `md5-...` or `crc32-...`. The caller has already
+        // gated on `!pkg.integrity.is_empty()`, so reaching this branch
+        // means a non-empty but unsupported value was supplied.
         let (expected_hash, algo) = if let Some(hash) = pkg.integrity.strip_prefix("sha1-") {
             (hash, HashAlgo::Sha1)
         } else if let Some(hash) = pkg.integrity.strip_prefix("sha256-") {
@@ -549,12 +584,10 @@ impl PackageDownloader {
         } else if let Some(hash) = pkg.integrity.strip_prefix("sha512-") {
             (hash, HashAlgo::Sha512)
         } else {
-            // Unknown format, skip verification with warning
-            debug!(
-                "Unknown integrity format for {} ({}), skipping verification",
-                pkg.name, pkg.integrity
-            );
-            return Ok(());
+            return Err(CratonsError::InvalidHash(format!(
+                "unsupported integrity algorithm for {}@{}: {:?} (expected sha256-, sha512-, sha1-, or h1-)",
+                pkg.name, pkg.version, pkg.integrity
+            )));
         };
 
         // Compute actual hash based on algorithm

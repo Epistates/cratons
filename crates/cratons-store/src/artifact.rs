@@ -4,7 +4,7 @@ use cratons_core::{ContentHash, HashAlgorithm, Hasher, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Canonical manifest filename stored alongside an artifact directory.
 pub const ARTIFACT_MANIFEST_NAME: &str = "cratons-manifest.json";
@@ -153,16 +153,37 @@ impl ArtifactStore {
             }
         }
 
-        // Create artifact directory
+        let mut stored_manifest = manifest.clone();
+        stored_manifest.output_hash = Some(output_hash.clone());
+
+        // Create artifact directory. The full input and output hashes are
+        // embedded in the path so the directory name is not a 12-character
+        // security boundary. Legacy short-prefix directories are still read
+        // by manifest scanning in `load`.
         let artifact_dir = self.root.join(format!(
-            "{}-{}",
-            manifest.input_hash.short(),
-            output_hash.short()
+            "{}-{}-{}-{}",
+            manifest.input_hash.algorithm,
+            manifest.input_hash.value,
+            output_hash.algorithm,
+            output_hash.value
         ));
 
         if artifact_dir.exists() {
-            debug!("Artifact already exists: {}", artifact_dir.display());
-            return Ok(manifest.input_hash.clone());
+            match Self::verify_artifact_dir(&artifact_dir, &manifest.input_hash)? {
+                Some(_) => {
+                    debug!("Artifact already exists: {}", artifact_dir.display());
+                    return Ok(manifest.input_hash.clone());
+                }
+                None => {
+                    return Err(cratons_core::CratonsError::Io(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!(
+                            "artifact directory exists but does not match expected input hash: {}",
+                            artifact_dir.display()
+                        ),
+                    )));
+                }
+            }
         }
 
         fs::create_dir_all(&artifact_dir)?;
@@ -172,7 +193,7 @@ impl ArtifactStore {
 
         // Write manifest
         let manifest_path = artifact_dir.join(ARTIFACT_MANIFEST_NAME);
-        let manifest_json = serde_json::to_string_pretty(manifest)?;
+        let manifest_json = serde_json::to_string_pretty(&stored_manifest)?;
         fs::write(manifest_path, manifest_json)?;
 
         info!(
@@ -187,32 +208,88 @@ impl ArtifactStore {
 
     /// Get an artifact by input hash.
     pub fn get(&self, input_hash: &ContentHash) -> Option<PathBuf> {
-        // Look for directories starting with the input hash prefix
-        let prefix = input_hash.short();
-
-        if let Ok(entries) = fs::read_dir(&self.root) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with(prefix) && entry.path().is_dir() {
-                    return Some(entry.path());
-                }
+        match self.load(input_hash) {
+            Ok(Some(artifact)) => Some(artifact.path),
+            Ok(None) => None,
+            Err(e) => {
+                warn!(
+                    input_hash = %input_hash,
+                    error = %e,
+                    "failed to verify local artifact cache entry"
+                );
+                None
             }
         }
-
-        None
     }
 
     /// Load an artifact with its manifest.
     pub fn load(&self, input_hash: &ContentHash) -> Result<Option<Artifact>> {
-        if let Some(path) = self.get(input_hash) {
-            let manifest_path = path.join(ARTIFACT_MANIFEST_NAME);
-            if manifest_path.exists() {
-                let manifest_json = fs::read_to_string(manifest_path)?;
-                let manifest: ArtifactManifest = serde_json::from_str(&manifest_json)?;
-                return Ok(Some(Artifact { manifest, path }));
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return Ok(None);
+        };
+
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            match Self::verify_artifact_dir(&path, input_hash) {
+                Ok(Some(manifest)) => return Ok(Some(Artifact { manifest, path })),
+                Ok(None) => continue,
+                Err(e) => {
+                    warn!(
+                        path = %path.display(),
+                        input_hash = %input_hash,
+                        error = %e,
+                        "ignoring invalid local artifact cache entry"
+                    );
+                }
             }
         }
+
         Ok(None)
+    }
+
+    /// Verify that an artifact directory matches the requested full input hash.
+    pub fn verify_artifact_dir(
+        path: &Path,
+        expected_input_hash: &ContentHash,
+    ) -> Result<Option<ArtifactManifest>> {
+        let manifest_path = path.join(ARTIFACT_MANIFEST_NAME);
+        if !manifest_path.exists() {
+            return Ok(None);
+        }
+
+        let manifest_json = fs::read_to_string(&manifest_path)?;
+        let manifest: ArtifactManifest = serde_json::from_str(&manifest_json)?;
+
+        if !manifest
+            .input_hash
+            .constant_time_verify(expected_input_hash)
+        {
+            return Ok(None);
+        }
+
+        let Some(expected_output_hash) = &manifest.output_hash else {
+            return Err(cratons_core::CratonsError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "artifact manifest missing output_hash",
+            )));
+        };
+
+        let actual_output_hash = hash_artifact_contents_with(path, expected_output_hash.algorithm)?;
+        if !actual_output_hash.constant_time_verify(expected_output_hash) {
+            return Err(cratons_core::CratonsError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "artifact output hash mismatch: manifest={}, actual={}",
+                    expected_output_hash, actual_output_hash
+                ),
+            )));
+        }
+
+        Ok(Some(manifest))
     }
 
     /// Check if an artifact exists for the given input hash.
@@ -351,7 +428,52 @@ mod tests {
 
         let artifact = store.load(&input_hash).unwrap().unwrap();
         assert_eq!(artifact.manifest.package, "test-package");
+        assert!(artifact.manifest.output_hash.is_some());
         assert!(artifact.has_file("binary"));
         assert!(artifact.has_file("lib/lib.so"));
+    }
+
+    #[test]
+    fn test_artifact_get_ignores_short_prefix_collision() {
+        let store_dir = tempdir().unwrap();
+        let store = ArtifactStore::new(store_dir.path());
+        let expected_hash = ContentHash::blake3("aaaaaaaaaaaa11111111111111111111".to_string());
+        let wrong_hash = ContentHash::blake3("aaaaaaaaaaaa22222222222222222222".to_string());
+
+        let collision_dir = store_dir.path().join("aaaaaaaaaaaa-collision");
+        fs::create_dir_all(&collision_dir).unwrap();
+        fs::write(collision_dir.join("artifact.bin"), b"payload").unwrap();
+        let output_hash = hash_artifact_contents(&collision_dir).unwrap();
+        let mut manifest =
+            ArtifactManifest::new(wrong_hash, "wrong-package".to_string(), "1.0.0".to_string());
+        manifest.output_hash = Some(output_hash);
+        fs::write(
+            collision_dir.join(ARTIFACT_MANIFEST_NAME),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        assert!(store.get(&expected_hash).is_none());
+    }
+
+    #[test]
+    fn test_artifact_get_rejects_tampered_payload() {
+        let store_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        fs::write(output_dir.path().join("binary"), b"test binary").unwrap();
+
+        let store = ArtifactStore::new(store_dir.path());
+        let input_hash = ContentHash::blake3("test_input_hash".to_string());
+        let manifest = ArtifactManifest::new(
+            input_hash.clone(),
+            "test-package".to_string(),
+            "1.0.0".to_string(),
+        );
+
+        store.store(&manifest, output_dir.path()).unwrap();
+        let path = store.get(&input_hash).unwrap();
+        fs::write(path.join("binary"), b"tampered").unwrap();
+
+        assert!(store.get(&input_hash).is_none());
     }
 }

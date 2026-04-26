@@ -11,7 +11,7 @@ pub enum Error {
 
     /// Keychain access error.
     #[error("Keychain error: {0}")]
-    Keychain(#[from] keyring::Error),
+    Keychain(#[from] keyring_core::Error),
 
     /// Serialization error.
     #[error("Serialization error: {0}")]

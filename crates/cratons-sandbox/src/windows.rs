@@ -65,6 +65,112 @@ use crate::error::SandboxError;
 use crate::result::{ResourceUsage, SandboxResult};
 use crate::{IsolationLevel, Sandbox};
 
+/// Environment variables that must never be inherited by a sandboxed
+/// process on Windows.
+///
+/// Mirrors the Linux/macOS deny-lists with Windows-specific additions
+/// (`PATHEXT`, `COMSPEC`, `_NT_*`, etc.). Cross-platform names from the
+/// Linux and macOS backends are repeated here so that a config carrying
+/// `LD_PRELOAD` or `DYLD_INSERT_LIBRARIES` is still rejected when the
+/// caller is running cratons under WSL or via a shared config layer.
+const BLOCKED_ENV_VARS: &[&str] = &[
+    // Credential leaks
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "NPM_TOKEN",
+    "PYPI_TOKEN",
+    "CARGO_REGISTRY_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AZURE_CLIENT_SECRET",
+    "DOCKER_AUTH_CONFIG",
+    // Cross-platform dynamic-linker hijacks (still block on Windows so a
+    // shared SandboxConfig doesn't leak them across hosts).
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    // Windows-specific code-loading vectors
+    "PATHEXT",      // Controls which extensions are treated as executable
+    "COMSPEC",      // Default command interpreter — redirect = arbitrary exec
+    "WINDIR",       // System32 lookups
+    "SYSTEMROOT",   // Same; many APIs trust this implicitly
+    "PROGRAMFILES", // Used by installers and PATH-resolution shims
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)",
+    "COMMONPROGRAMW6432",
+    "USERPROFILE", // Resolves %USERPROFILE%\... credential paths
+    "APPDATA",     // Same — token caches live here
+    "LOCALAPPDATA",
+    // Debugger / image-load hijacks
+    "_NT_SYMBOL_PATH",
+    "_NT_ALT_SYMBOL_PATH",
+    "_NT_DEBUGGER_EXTENSION_PATH",
+    "_NT_EXECUTABLE_IMAGE_FILE_PATH",
+    "_NT_SOURCE_PATH",
+    // Scripting-language code injection
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "NODE_EXTRA_CA_CERTS",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "CLASSPATH",
+    "PERL5OPT",
+    "PERL5LIB",
+    "RUBYOPT",
+    "RUBYLIB",
+    // Network proxy (potential exfil channel)
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "FTP_PROXY",
+    // Git exploitation
+    "GIT_ASKPASS",
+    "GIT_SSH_COMMAND",
+    "GIT_PROXY_COMMAND",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_EXEC_PATH",
+];
+
+/// Environment-variable name prefixes that must never be inherited.
+/// Matched case-insensitively.
+const BLOCKED_ENV_PREFIXES: &[&str] = &[
+    "LD_", "DYLD_", "_NT_",
+    "CRATONS_", // Internal cratons configuration — never propagate into the sandbox.
+];
+
+/// Check if an environment variable is safe to forward into the Windows
+/// sandbox child. Returns `true` if the variable is safe, `false` if it
+/// must be blocked.
+#[must_use]
+pub fn is_safe_env_var(name: &str) -> bool {
+    if BLOCKED_ENV_VARS
+        .iter()
+        .any(|blocked| blocked.eq_ignore_ascii_case(name))
+    {
+        return false;
+    }
+    let upper = name.to_ascii_uppercase();
+    if BLOCKED_ENV_PREFIXES
+        .iter()
+        .any(|prefix| upper.starts_with(prefix))
+    {
+        return false;
+    }
+    true
+}
+
 /// Windows sandbox using Job Objects for process isolation and resource limits.
 ///
 /// Job Objects provide:
@@ -287,12 +393,37 @@ impl WindowsSandbox {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        // Environment handling
-        if !config.inherit_env {
-            cmd.env_clear();
+        // Environment handling.
+        //
+        // SECURITY: caller-supplied env vars are filtered through
+        // `is_safe_env_var` before being forwarded to the Job-object child.
+        // Prior to this check the Windows backend forwarded everything in
+        // `config.env` verbatim, which was inconsistent with the Linux and
+        // macOS backends and let dangerous values like `LD_PRELOAD`,
+        // `DYLD_INSERT_LIBRARIES`, `PATHEXT`, `COMSPEC`, `_NT_*`, and
+        // credential tokens flow into the sandboxed process unchecked.
+        cmd.env_clear();
+        if config.inherit_env {
+            for (key, value) in std::env::vars() {
+                if is_safe_env_var(&key) {
+                    cmd.env(&key, value);
+                } else {
+                    debug!(
+                        env_var = %key,
+                        "Blocked dangerous inherited environment variable in Windows sandbox"
+                    );
+                }
+            }
         }
         for (key, value) in &config.env {
-            cmd.env(key, value);
+            if is_safe_env_var(key) {
+                cmd.env(key, value);
+            } else {
+                debug!(
+                    env_var = %key,
+                    "Blocked dangerous environment variable in Windows sandbox"
+                );
+            }
         }
 
         let start = Instant::now();
@@ -418,6 +549,37 @@ impl Sandbox for WindowsSandbox {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn env_filter_blocks_dangerous_vars() {
+        for blocked in [
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "PATHEXT",
+            "COMSPEC",
+            "_NT_SYMBOL_PATH",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "NODE_OPTIONS",
+            "GIT_SSH_COMMAND",
+            "CRATONS_INTERNAL_FLAG",
+        ] {
+            assert!(
+                !is_safe_env_var(blocked),
+                "{blocked} must be blocked by Windows env filter"
+            );
+        }
+    }
+
+    #[test]
+    fn env_filter_allows_benign_vars() {
+        for allowed in ["PATH", "MY_BUILD_FLAG", "RUST_LOG", "CARGO_TARGET_DIR"] {
+            assert!(
+                is_safe_env_var(allowed),
+                "{allowed} should pass Windows env filter"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_simple_command() {

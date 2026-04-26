@@ -45,13 +45,6 @@ yanked = "deny"
 # Security advisory exceptions
 # Add entries here ONLY with security team approval and a remediation plan
 ignore = [
-    # protobuf vulnerability pulled in via rust-criu (libcontainer 0.6.0 transitive)
-    # Impact: Limited - protobuf 3.2.0 is only used for CRIU checkpoint/restore; cratons
-    # does not deserialize untrusted protobuf messages on this path.
-    # Mitigation: CRIU feature not exercised by cratons; no untrusted protobuf input.
-    # Tracking: Waiting for rust-criu > 0.4.0 with updated protobuf (>=3.7.2).
-    { id = "RUSTSEC-2024-0437", reason = "Transitive via rust-criu/libcontainer; CRIU path unused by cratons" },
-
     # rsa Marvin timing sidechannel — no upstream fix available
     # Impact: Theoretical key-recovery via timing on RSA decryption. Reached only via
     # sigstore / pgp / openidconnect, which cratons uses for VERIFICATION of detached
@@ -61,14 +54,6 @@ ignore = [
     # Tracking: Waiting for RustCrypto/RSA constant-time fix (rsa >= 0.10 or replacement).
     { id = "RUSTSEC-2023-0071", reason = "Verification-only path; no private-key decryption in cratons" },
 
-    # rand 0.8 unsoundness with custom tracing logger calling rand::rng()
-    # Impact: Only triggers if a custom tracing subscriber invokes rand::rng() re-entrantly
-    # during log emission. cratons observability uses tracing-subscriber fmt/json layers
-    # and OpenTelemetry OTLP layers — none of these sample randomness during log emission.
-    # Mitigation: No cratons code and no configured layer calls rand::rng() in a logger.
-    # Full reachability analysis: docs/security-followups.md#f-4
-    # Tracking: ecosystem-blocked on argon2/aes-gcm/rsa upgrading to rand_core 0.9.
-    { id = "RUSTSEC-2026-0097", reason = "Not reachable; see docs/security-followups.md#f-4" },
 ]
 
 # Git sources for advisory databases
@@ -94,10 +79,12 @@ allow = [
     # Permissive licenses - fully compatible with commercial use
     "MIT",                  # Most common, very permissive
     "Apache-2.0",           # Permissive with patent grant
+    "Apache-2.0 WITH LLVM-exception", # Apache-2.0 plus LLVM exception, permissive
     "BSD-2-Clause",         # Simplified BSD, permissive
     "BSD-3-Clause",         # New BSD, permissive
     "ISC",                  # Equivalent to MIT, used by OpenSSL
     "Zlib",                 # Very permissive, used by compression libs
+    "bzip2-1.0.6",          # Permissive bzip2 license, used by Rust bzip2 bindings
     "CC0-1.0",              # Public domain dedication
     "Unlicense",            # Public domain equivalent
 
@@ -105,7 +92,6 @@ allow = [
     "MPL-2.0",              # Mozilla Public License, file-level copyleft only
 
     # Unicode licenses - required for text processing
-    "Unicode-DFS-2016",     # Unicode data files and software
     "Unicode-3.0",          # Unicode license
 
     # Data licenses - required for TLS root certificates
@@ -118,9 +104,12 @@ allow = [
 
 # Exceptions for specific crates with alternative licenses or missing licenses
 exceptions = [
-    # rust-criu: GPL-2.0 but only used for Linux checkpoint/restore feature (optional)
-    { name = "rust-criu", allow = ["GPL-2.0"] },
 ]
+
+[[licenses.clarify]]
+name = "sigstore-protobuf-specs-derive"
+expression = "Apache-2.0"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 # Private crates - not subject to licensing checks
 [licenses.private]
@@ -153,9 +142,12 @@ external-default-features = "allow"
 # Explicitly banned crates
 # Add crates here that should NEVER be used
 deny = [
-    # Example entries:
-    # { name = "openssl", reason = "Use rustls instead for memory safety" },
-    # { name = "native-tls", reason = "Use rustls for consistent cross-platform TLS" },
+    { name = "openssl", reason = "Use rustls/aws-lc instead for memory-safe TLS" },
+    { name = "native-tls", reason = "Use rustls for consistent cross-platform TLS" },
+    { name = "keyring", reason = "Use keyring-core plus explicit native stores to avoid heavyweight fallback stores" },
+    { name = "libcontainer", reason = "Use host OCI runtimes through hardened bundle generation instead of linking CRIU/libcontainer" },
+    { name = "rust-criu", reason = "CRIU bindings pull vulnerable protobuf and are not needed for package script isolation" },
+    { name = "protobuf", reason = "Use prost or other maintained protobuf implementations" },
 ]
 
 # Skip specific version combinations that are known acceptable

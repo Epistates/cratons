@@ -124,28 +124,33 @@ namespace Cratons {
         // Attributes
         let mut attrs = HashMap::new();
 
-        fn mk_str(s: &str) -> RestrictedExpression {
-            let escaped = s.replace('"', "\"");
-            RestrictedExpression::from_str(&format!("\"{}\"", escaped)).unwrap()
-        }
-
-        fn mk_long(i: i64) -> RestrictedExpression {
-            RestrictedExpression::from_str(&i.to_string()).unwrap()
-        }
-
-        attrs.insert("name".to_string(), mk_str(package_name));
-        attrs.insert("ecosystem".to_string(), mk_str(&ecosystem.to_string()));
-        attrs.insert("registry".to_string(), mk_str(ecosystem.default_registry()));
-        attrs.insert("version".to_string(), mk_str(version));
-        attrs.insert("max_severity".to_string(), mk_long(max_severity));
+        attrs.insert(
+            "name".to_string(),
+            RestrictedExpression::new_string(package_name.to_string()),
+        );
+        attrs.insert(
+            "ecosystem".to_string(),
+            RestrictedExpression::new_string(ecosystem.to_string()),
+        );
+        attrs.insert(
+            "registry".to_string(),
+            RestrictedExpression::new_string(ecosystem.default_registry().to_string()),
+        );
+        attrs.insert(
+            "version".to_string(),
+            RestrictedExpression::new_string(version.to_string()),
+        );
+        attrs.insert(
+            "max_severity".to_string(),
+            RestrictedExpression::new_long(max_severity),
+        );
 
         // Set of vulnerabilities
-        let vuln_list: Vec<String> = vulnerabilities
-            .iter()
-            .map(|v| format!("\"{}\"", v.replace('"', "\"")))
-            .collect();
-        let vuln_set_str = format!("[{}]", vuln_list.join(", "));
-        let vuln_expr = RestrictedExpression::from_str(&vuln_set_str).unwrap();
+        let vuln_expr = RestrictedExpression::new_set(
+            vulnerabilities
+                .iter()
+                .map(|v| RestrictedExpression::new_string(v.clone())),
+        );
         attrs.insert("vulnerabilities".to_string(), vuln_expr);
 
         // Create Entity
@@ -247,30 +252,31 @@ namespace Cratons {
             // Attributes
             let mut attrs = HashMap::new();
 
-            // Helper to create expressions safely
-            fn mk_str(s: &str) -> RestrictedExpression {
-                // Escape string for Cedar syntax
-                let escaped = s.replace('"', "\"");
-                RestrictedExpression::from_str(&format!("\"{}\"", escaped)).unwrap()
-            }
-
-            fn mk_long(i: i64) -> RestrictedExpression {
-                RestrictedExpression::from_str(&i.to_string()).unwrap()
-            }
-
-            attrs.insert("name".to_string(), mk_str(&pkg.name));
-            attrs.insert("ecosystem".to_string(), mk_str(&pkg.ecosystem.to_string()));
-            attrs.insert("registry".to_string(), mk_str(&pkg.source));
-            attrs.insert("version".to_string(), mk_str(&pkg.version));
-            attrs.insert("max_severity".to_string(), mk_long(max_severity));
+            attrs.insert(
+                "name".to_string(),
+                RestrictedExpression::new_string(pkg.name.clone()),
+            );
+            attrs.insert(
+                "ecosystem".to_string(),
+                RestrictedExpression::new_string(pkg.ecosystem.to_string()),
+            );
+            attrs.insert(
+                "registry".to_string(),
+                RestrictedExpression::new_string(pkg.source.clone()),
+            );
+            attrs.insert(
+                "version".to_string(),
+                RestrictedExpression::new_string(pkg.version.clone()),
+            );
+            attrs.insert(
+                "max_severity".to_string(),
+                RestrictedExpression::new_long(max_severity),
+            );
 
             // Set of vulnerabilities
-            let vuln_list: Vec<String> = vulns
-                .into_iter()
-                .map(|v| format!("\"{}\"", v.replace('"', "\"")))
-                .collect();
-            let vuln_set_str = format!("[{}]", vuln_list.join(", "));
-            let vuln_expr = RestrictedExpression::from_str(&vuln_set_str).unwrap();
+            let vuln_expr = RestrictedExpression::new_set(
+                vulns.into_iter().map(RestrictedExpression::new_string),
+            );
 
             attrs.insert("vulnerabilities".to_string(), vuln_expr);
 
@@ -455,5 +461,30 @@ forbid(
         let v = violation.unwrap();
         assert_eq!(v.package, "lodash");
         assert_eq!(v.version, "4.17.0");
+    }
+
+    #[test]
+    fn test_pre_install_check_handles_quotes_in_values() {
+        let policy = r#"
+permit(
+    principal,
+    action,
+    resource
+) when {
+    resource.name == "bad\"name"
+};
+"#;
+        let engine = PolicyEngine::from_str(policy).unwrap();
+
+        let result = engine.check_pre_install(
+            "bad\"name",
+            "1.0.0\"quoted",
+            cratons_core::Ecosystem::Npm,
+            &["CVE-TEST-\"QUOTED".to_string()],
+            1,
+        );
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 }

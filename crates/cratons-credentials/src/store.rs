@@ -36,20 +36,49 @@ pub trait CredentialStore: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
-/// System keychain storage (macOS Keychain, Windows Credential Manager, Linux Secret Service).
+/// System keychain storage (macOS Keychain, Windows Credential Manager, Linux keyutils).
 ///
 /// # Security Considerations
 ///
-/// The underlying `keyring` crate uses OS-provided credential storage:
+/// The underlying `keyring-core` store uses OS-provided credential storage:
 /// - **macOS**: Keychain Services (credentials protected by login password)
 /// - **Windows**: Credential Manager (credentials encrypted per-user)
-/// - **Linux**: Secret Service API (typically via GNOME Keyring or KWallet)
+/// - **Linux**: kernel keyrings via keyutils
 ///
 /// Access control is managed by the OS; we cannot programmatically configure
 /// which applications can access stored credentials. Users should review their
 /// OS keychain settings if stricter access control is required.
 pub struct KeychainStore {
     service: String,
+}
+
+fn install_native_keyring_store() -> Result<(), keyring_core::Error> {
+    if keyring_core::get_default_store().is_some() {
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        keyring_core::set_default_store(apple_native_keyring_store::keychain::Store::new()?);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        keyring_core::set_default_store(linux_keyutils_keyring_store::Store::new()?);
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        keyring_core::set_default_store(windows_native_keyring_store::Store::new()?);
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err(keyring_core::Error::NoDefaultStore)
+    }
 }
 
 impl KeychainStore {
@@ -67,8 +96,13 @@ impl KeychainStore {
 
     /// Check if keychain access is available on this system.
     pub fn is_available() -> bool {
+        if let Err(e) = install_native_keyring_store() {
+            debug!("Keychain native store not available: {}", e);
+            return false;
+        }
+
         // Try to create a test entry to check if keychain is accessible
-        let entry = keyring::Entry::new("cratons-availability-check", "test");
+        let entry = keyring_core::Entry::new("cratons-availability-check", "test");
         match entry {
             Ok(_) => true,
             Err(e) => {
@@ -88,27 +122,30 @@ impl Default for KeychainStore {
 #[async_trait]
 impl CredentialStore for KeychainStore {
     async fn get(&self, key: &str) -> Result<Option<SecretString>, Error> {
-        let entry = keyring::Entry::new(&self.service, key)?;
+        install_native_keyring_store()?;
+        let entry = keyring_core::Entry::new(&self.service, key)?;
 
         match entry.get_password() {
             Ok(password) => Ok(Some(SecretString::from(password))),
-            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(e) => Err(Error::Keychain(e)),
         }
     }
 
     async fn set(&self, key: &str, value: SecretString) -> Result<(), Error> {
         use secrecy::ExposeSecret;
-        let entry = keyring::Entry::new(&self.service, key)?;
+        install_native_keyring_store()?;
+        let entry = keyring_core::Entry::new(&self.service, key)?;
         entry.set_password(value.expose_secret())?;
         Ok(())
     }
 
     async fn delete(&self, key: &str) -> Result<(), Error> {
-        let entry = keyring::Entry::new(&self.service, key)?;
+        install_native_keyring_store()?;
+        let entry = keyring_core::Entry::new(&self.service, key)?;
         match entry.delete_credential() {
             Ok(()) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()), // Already deleted
+            Err(keyring_core::Error::NoEntry) => Ok(()), // Already deleted
             Err(e) => Err(Error::Keychain(e)),
         }
     }
@@ -325,10 +362,17 @@ impl FileStore {
     }
 
     /// Generate a new random salt.
-    fn generate_salt() -> String {
+    fn generate_salt() -> Result<String, Error> {
         use argon2::password_hash::SaltString;
-        use rand::rngs::OsRng;
-        SaltString::generate(&mut OsRng).to_string()
+        use rand::{TryRng, rngs::SysRng};
+
+        let mut salt = [0u8; 16];
+        SysRng
+            .try_fill_bytes(&mut salt)
+            .map_err(|e| Error::Encryption(format!("Failed to generate salt: {e}")))?;
+        SaltString::encode_b64(&salt)
+            .map(|salt| salt.to_string())
+            .map_err(|e| Error::Encryption(format!("Failed to encode salt: {e}")))
     }
 
     fn encrypt(&self, data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, Error> {
@@ -336,16 +380,17 @@ impl FileStore {
             Aes256Gcm, Nonce,
             aead::{Aead, KeyInit},
         };
-        use rand::RngCore;
-        use rand::rngs::OsRng;
+        use rand::{TryRng, rngs::SysRng};
 
         let cipher =
             Aes256Gcm::new_from_slice(key).map_err(|e| Error::Encryption(e.to_string()))?;
 
-        // SECURITY: Use OsRng directly for cryptographic nonces to avoid
-        // any potential issues with thread-local PRNG state
+        // SECURITY: Use the OS CSPRNG directly for cryptographic nonces to
+        // avoid any potential issues with thread-local PRNG state.
         let mut nonce_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_bytes);
+        SysRng
+            .try_fill_bytes(&mut nonce_bytes)
+            .map_err(|e| Error::Encryption(format!("Failed to generate nonce: {e}")))?;
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let ciphertext = cipher
@@ -422,10 +467,10 @@ impl FileStore {
             if contents.len() >= Self::SALT_LEN {
                 contents[..Self::SALT_LEN].to_string()
             } else {
-                Self::generate_salt()
+                Self::generate_salt()?
             }
         } else {
-            Self::generate_salt()
+            Self::generate_salt()?
         };
 
         let mut key = self.derive_key(&salt)?;

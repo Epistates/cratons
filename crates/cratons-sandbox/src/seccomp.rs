@@ -79,7 +79,7 @@ pub fn default_build_profile() -> LinuxSeccomp {
     LinuxSeccompBuilder::default()
         .default_action(LinuxSeccompAction::ScmpActAllow)
         .default_errno_ret(1u32) // EPERM
-        .architectures(vec![LinuxArch::ScmpArchX8664, LinuxArch::ScmpArchAarch64])
+        .architectures(vec![LinuxArch::ScmpArchX86_64, LinuxArch::ScmpArchAarch64])
         .syscalls(vec![
             // Kernel module operations - BLOCK
             LinuxSyscallBuilder::default()
@@ -274,6 +274,35 @@ pub fn default_build_profile() -> LinuxSeccomp {
                 .errno_ret(1u32)
                 .build()
                 .unwrap(),
+            // SECURITY: io_uring - BLOCK (multiple kernel CVEs: CVE-2022-29582,
+            // CVE-2023-2598, CVE-2024-0582). Async I/O submission queues bypass
+            // seccomp filtering for submitted operations and have been a
+            // recurring source of kernel UAF/privilege escalation. Build tools
+            // do not require io_uring; standard read/write/openat are available.
+            LinuxSyscallBuilder::default()
+                .names(vec![
+                    "io_uring_setup".to_string(),
+                    "io_uring_enter".to_string(),
+                    "io_uring_register".to_string(),
+                ])
+                .action(LinuxSeccompAction::ScmpActErrno)
+                .errno_ret(1u32)
+                .build()
+                .unwrap(),
+            // SECURITY: pidfd file-descriptor operations - BLOCK. pidfd_getfd
+            // allows stealing an fd from another process via /proc leak paths,
+            // and pidfd_open/pidfd_send_signal are the bootstrap primitives
+            // for that class of attack. Build tools have no legitimate need.
+            LinuxSyscallBuilder::default()
+                .names(vec![
+                    "pidfd_open".to_string(),
+                    "pidfd_getfd".to_string(),
+                    "pidfd_send_signal".to_string(),
+                ])
+                .action(LinuxSeccompAction::ScmpActErrno)
+                .errno_ret(1u32)
+                .build()
+                .unwrap(),
             // SECURITY: clone/clone3 with namespace flags - BLOCK
             // Even though unshare is blocked, clone() with CLONE_NEWUSER can achieve
             // the same namespace escape. This rule blocks clone when ANY dangerous
@@ -291,7 +320,7 @@ pub fn default_build_profile() -> LinuxSeccomp {
                     // Unfortunately, seccomp only has MaskedEqual, not MaskedNotEqual
                     // So we need individual rules for each flag
                     LinuxSeccompArgBuilder::default()
-                        .index(0u32)
+                        .index(0usize)
                         .value(CLONE_NEWUSER)
                         .op(LinuxSeccompOperator::ScmpCmpMaskedEq)
                         .build()
@@ -305,7 +334,7 @@ pub fn default_build_profile() -> LinuxSeccomp {
                 .errno_ret(1u32)
                 .args(vec![
                     LinuxSeccompArgBuilder::default()
-                        .index(0u32)
+                        .index(0usize)
                         .value(CLONE_NEWNS)
                         .op(LinuxSeccompOperator::ScmpCmpMaskedEq)
                         .build()
@@ -319,7 +348,7 @@ pub fn default_build_profile() -> LinuxSeccomp {
                 .errno_ret(1u32)
                 .args(vec![
                     LinuxSeccompArgBuilder::default()
-                        .index(0u32)
+                        .index(0usize)
                         .value(CLONE_NEWPID)
                         .op(LinuxSeccompOperator::ScmpCmpMaskedEq)
                         .build()
@@ -333,7 +362,7 @@ pub fn default_build_profile() -> LinuxSeccomp {
                 .errno_ret(1u32)
                 .args(vec![
                     LinuxSeccompArgBuilder::default()
-                        .index(0u32)
+                        .index(0usize)
                         .value(CLONE_NEWNET)
                         .op(LinuxSeccompOperator::ScmpCmpMaskedEq)
                         .build()
@@ -366,7 +395,7 @@ pub fn strict_profile() -> LinuxSeccomp {
     LinuxSeccompBuilder::default()
         .default_action(LinuxSeccompAction::ScmpActErrno)
         .default_errno_ret(1u32)
-        .architectures(vec![LinuxArch::ScmpArchX8664, LinuxArch::ScmpArchAarch64])
+        .architectures(vec![LinuxArch::ScmpArchX86_64, LinuxArch::ScmpArchAarch64])
         .syscalls(vec![
             // Essential I/O
             LinuxSyscallBuilder::default()
@@ -458,8 +487,8 @@ pub fn strict_profile() -> LinuxSeccomp {
                     // MaskedEqual: (arg & mask) == value
                     // We check: (flags & CLONE_DANGEROUS_FLAGS) == 0
                     LinuxSeccompArgBuilder::default()
-                        .index(0u32)
-                        .value(0) // Must equal 0 after masking
+                        .index(0usize)
+                        .value(0u64) // Must equal 0 after masking
                         .value_two(CLONE_DANGEROUS_FLAGS) // The mask
                         .op(LinuxSeccompOperator::ScmpCmpMaskedEq)
                         .build()
@@ -641,5 +670,33 @@ mod tests {
     fn test_seccomp_level_none() {
         let level = SeccompLevel::None;
         assert!(level.profile().is_none());
+    }
+
+    #[test]
+    fn default_profile_blocks_io_uring_and_pidfd() {
+        let profile = default_build_profile();
+        let syscalls = profile.syscalls().as_ref().expect("syscall list present");
+        let mut blocked: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for rule in syscalls {
+            if rule.action() != LinuxSeccompAction::ScmpActErrno {
+                continue;
+            }
+            for name in rule.names() {
+                blocked.insert(name.as_str());
+            }
+        }
+        for required in [
+            "io_uring_setup",
+            "io_uring_enter",
+            "io_uring_register",
+            "pidfd_open",
+            "pidfd_getfd",
+            "pidfd_send_signal",
+        ] {
+            assert!(
+                blocked.contains(required),
+                "default seccomp profile missing block for {required}"
+            );
+        }
     }
 }

@@ -279,10 +279,18 @@ impl PostInstallRunner {
                 .with_network(NetworkAccess::None)
                 // Restrictive resource limits for post-install scripts
                 .with_limits(ResourceLimits::for_post_install())
-                // Inherit minimal env needed for scripts to run
+                // Inherit minimal env needed for scripts to run.
+                //
+                // SECURITY: do NOT forward the caller's real `HOME` value
+                // into the sandbox. Keep package script home/cache state
+                // scoped to the package directory so credential paths are
+                // never advertised to untrusted lifecycle scripts.
                 .with_env(
                     "HOME",
-                    std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()),
+                    package_dir
+                        .join(".cratons-home")
+                        .to_string_lossy()
+                        .to_string(),
                 )
                 .with_env("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
                 .with_env("NODE_ENV", "production")
@@ -290,6 +298,38 @@ impl PostInstallRunner {
                     "npm_config_cache",
                     package_dir.join(".npm-cache").to_string_lossy().to_string(),
                 );
+
+        #[cfg(target_os = "linux")]
+        let mut config = config;
+
+        #[cfg(target_os = "linux")]
+        if matches!(isolation, cratons_sandbox::IsolationLevel::Container)
+            && config.rootfs.is_none()
+        {
+            if let Some(rootfs) = cratons_sandbox::linux::LinuxSandbox::default_rootfs() {
+                config = config.with_rootfs(rootfs);
+            } else {
+                match self.sandbox_policy {
+                    SandboxPolicy::Required => {
+                        return Err(CratonsError::BuildFailed(format!(
+                            "sandbox_policy=Required; Linux container sandbox requires a \
+                             trusted rootfs for package '{}'. Set CRATONS_SANDBOX_ROOTFS \
+                             or install one at /var/lib/cratons/rootfs.",
+                            package_name
+                        )));
+                    }
+                    SandboxPolicy::Preferred => {
+                        warn!(
+                            package = %package_name,
+                            "sandbox_policy=Preferred; Linux container rootfs is not configured, \
+                             falling back to direct execution on host"
+                        );
+                        return self.run_direct(script, package_dir);
+                    }
+                    SandboxPolicy::Disabled => return self.run_direct(script, package_dir),
+                }
+            }
+        }
 
         // Capability check against the derived requirements. This is the
         // policy gate that replaces the old silent `matches!(None | Process)`
@@ -389,41 +429,42 @@ impl PostInstallRunner {
         PackageScripts::from_package_dir(package_dir).has_lifecycle_scripts()
     }
 
-    /// Run binding.gyp native compilation (node-gyp).
-    pub async fn run_node_gyp(&self, package_dir: &Path) -> Result<()> {
+    /// Run binding.gyp native compilation (`node-gyp rebuild`).
+    ///
+    /// SECURITY: native compilation invokes the system C/C++ toolchain on
+    /// arbitrary `binding.gyp` content from the package — the same supply-
+    /// chain trust boundary as a lifecycle script. Previously this ran the
+    /// compilation directly via `Command::new("node-gyp")` with no sandbox,
+    /// no env clearing, and no resource limits, silently bypassing
+    /// `SandboxPolicy::Required`. We now route it through the same
+    /// `run_isolated` / `run_direct` dispatch used by `preinstall`/
+    /// `postinstall`, so a `binding.gyp` cannot escape an isolation policy
+    /// the operator has enforced.
+    pub async fn run_node_gyp(
+        &self,
+        package_dir: &Path,
+        project_dir: &Path,
+        package_name: &str,
+    ) -> Result<()> {
         let binding_gyp = package_dir.join("binding.gyp");
         if !binding_gyp.exists() {
             return Ok(());
         }
 
-        info!("Running node-gyp rebuild for native module");
+        info!(package = %package_name, "Running node-gyp rebuild for native module");
+        let script = "node-gyp rebuild";
 
-        let output = Command::new("node-gyp")
-            .arg("rebuild")
-            .current_dir(package_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
-
-        match output {
-            Ok(output) if output.status.success() => {
-                debug!("node-gyp rebuild succeeded");
-                Ok(())
+        match self.sandbox_policy {
+            SandboxPolicy::Disabled => {
+                warn!(
+                    package = %package_name,
+                    "sandbox_policy=Disabled; running node-gyp rebuild directly on host"
+                );
+                self.run_direct(script, package_dir)
             }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!("node-gyp rebuild failed: {}", stderr);
-                Err(CratonsError::BuildFailed(format!(
-                    "node-gyp rebuild failed: {}",
-                    stderr
-                )))
-            }
-            Err(e) => {
-                warn!("node-gyp not found or failed to execute: {}", e);
-                Err(CratonsError::BuildFailed(format!(
-                    "node-gyp not available: {}",
-                    e
-                )))
+            SandboxPolicy::Required | SandboxPolicy::Preferred => {
+                self.run_isolated(script, package_dir, project_dir, package_name)
+                    .await
             }
         }
     }
@@ -458,7 +499,8 @@ impl PostInstallRunner {
 
         // Run node-gyp for native modules
         if scripts.has_native {
-            self.run_node_gyp(package_dir).await?;
+            self.run_node_gyp(package_dir, project_dir, &scripts.name)
+                .await?;
         }
 
         Ok(())
@@ -615,19 +657,18 @@ mod tests {
     }
 
     #[test]
-    fn missing_capabilities_os_sandbox_satisfies_post_install() {
-        // OsSandbox is macOS sandbox-exec. After the Phase 3 fix it reports
-        // network isolation (SBPL `(deny network*)`) and satisfies the
-        // full capability set required by post-install scripts.
+    fn missing_capabilities_os_sandbox_is_not_full_post_install_isolation() {
+        // OsSandbox is macOS sandbox-exec. It provides network/process/write
+        // controls, but not the full read isolation or resource limits required
+        // by strict post-install execution.
         let cfg = post_install_config();
         let missing = PostInstallRunner::missing_capabilities(
             cratons_sandbox::IsolationLevel::OsSandbox,
             &cfg,
         );
-        assert!(
-            missing.is_empty(),
-            "OsSandbox should satisfy post-install requirements, got {missing:?}"
-        );
+        assert!(!missing.contains(&"network_isolation"));
+        assert!(missing.contains(&"filesystem_isolation"));
+        assert!(missing.contains(&"resource_limits"));
     }
 
     #[test]

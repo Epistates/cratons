@@ -9,13 +9,14 @@
 //! - **Seccomp profiles**: Syscall filtering to prevent privilege escalation
 //! - **Read-only rootfs**: Rootfs is read-only by default
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use cratons_core::{CratonsError, Result};
 use oci_spec::runtime::{
     Capability, LinuxBuilder, LinuxCapabilitiesBuilder, LinuxNamespaceBuilder, LinuxNamespaceType,
-    LinuxResourcesBuilder, LinuxSeccompAction, Mount, MountBuilder, ProcessBuilder, RootBuilder,
-    Spec, SpecBuilder, UserBuilder,
+    LinuxPidsBuilder, LinuxResourcesBuilder, Mount, MountBuilder, PosixRlimitBuilder,
+    PosixRlimitType, ProcessBuilder, RootBuilder, Spec, SpecBuilder, UserBuilder,
 };
 
 use crate::config::{NetworkAccess, SandboxConfig};
@@ -71,7 +72,44 @@ impl OciSpecGenerator {
         // SECURITY: Build capabilities with minimal permissions
         let capabilities = Self::minimal_capabilities()?;
 
-        let process = ProcessBuilder::default()
+        // SECURITY: POSIX rlimits on the process.
+        //
+        // `ResourceLimits::fsize` and `ResourceLimits::nofile` are honored
+        // here via the process-scoped rlimit list. This is the enforcement
+        // path for:
+        //
+        // - RLIMIT_FSIZE: cap the size of any single file the build can
+        //   write, so a malicious or runaway build cannot fill the host
+        //   disk via one huge file (fork-bomb-of-bytes).
+        // - RLIMIT_NOFILE: cap the number of open fds, preventing fd
+        //   exhaustion DoS.
+        //
+        // Without these, `ResourceLimits::for_post_install` (which sets
+        // `nofile: Some(1024)`) would be a silent no-op — the field exists
+        // on the struct but was not wired into the OCI spec.
+        let mut rlimits = Vec::new();
+        if let Some(fsize) = config.limits.fsize {
+            rlimits.push(
+                PosixRlimitBuilder::default()
+                    .typ(PosixRlimitType::RlimitFsize)
+                    .hard(fsize)
+                    .soft(fsize)
+                    .build()
+                    .map_err(|e| CratonsError::Container(e.to_string()))?,
+            );
+        }
+        if let Some(nofile) = config.limits.nofile {
+            rlimits.push(
+                PosixRlimitBuilder::default()
+                    .typ(PosixRlimitType::RlimitNofile)
+                    .hard(nofile)
+                    .soft(nofile)
+                    .build()
+                    .map_err(|e| CratonsError::Container(e.to_string()))?,
+            );
+        }
+
+        let mut process_builder = ProcessBuilder::default()
             .terminal(false)
             .user(user)
             .args(args)
@@ -79,7 +117,11 @@ impl OciSpecGenerator {
             .cwd(config.workdir.to_string_lossy().to_string())
             .no_new_privileges(true)
             // SECURITY: Drop all capabilities except minimal set
-            .capabilities(capabilities)
+            .capabilities(capabilities);
+        if !rlimits.is_empty() {
+            process_builder = process_builder.rlimits(rlimits);
+        }
+        let process = process_builder
             .build()
             .map_err(|e| CratonsError::Container(e.to_string()))?;
 
@@ -123,17 +165,24 @@ impl OciSpecGenerator {
                 .map_err(|e| CratonsError::Container(e.to_string()))?,
         );
 
-        // SECURITY: Drop all capabilities by default for defense in depth
-        // Only add back the absolute minimum needed for container operation
-        let capabilities = Self::minimal_capabilities()?;
-
         let mut linux_builder = LinuxBuilder::default()
             .namespaces(namespaces)
             // SECURITY: Apply strict seccomp profile
             .seccomp(seccomp::default_build_profile());
 
-        // Apply Resource Limits
-        if config.limits.memory.is_some() || config.limits.cpu_shares.is_some() {
+        // Apply Resource Limits.
+        //
+        // SECURITY: the `pids` cgroup caps total process count and is
+        // enforced here alongside memory and cpu. Without it, a build
+        // script that fork-bombs cannot be contained — fork bombs have
+        // been a well-known cgroup-v1/v2 DoS primitive since the pids
+        // controller was added in kernel 4.3. `ResourceLimits::for_post_install`
+        // sets `pids: Some(100)`; this is the enforcement path for that
+        // value.
+        if config.limits.memory.is_some()
+            || config.limits.cpu_shares.is_some()
+            || config.limits.pids.is_some()
+        {
             let mut resources_builder = LinuxResourcesBuilder::default();
 
             if let Some(mem) = config.limits.memory {
@@ -149,6 +198,15 @@ impl OciSpecGenerator {
                 resources_builder = resources_builder.cpu(
                     oci_spec::runtime::LinuxCpuBuilder::default()
                         .shares(shares)
+                        .build()
+                        .map_err(|e| CratonsError::Container(e.to_string()))?,
+                );
+            }
+
+            if let Some(pids) = config.limits.pids {
+                resources_builder = resources_builder.pids(
+                    LinuxPidsBuilder::default()
+                        .limit(pids as i64)
                         .build()
                         .map_err(|e| CratonsError::Container(e.to_string()))?,
                 );
@@ -208,15 +266,15 @@ impl OciSpecGenerator {
         // This is the most secure configuration for build containers
         let caps = LinuxCapabilitiesBuilder::default()
             // Effective capabilities (what the process can actually use)
-            .effective(Vec::<Capability>::new())
+            .effective(HashSet::<Capability>::new())
             // Bounding set (maximum capabilities possible)
-            .bounding(Vec::<Capability>::new())
+            .bounding(HashSet::<Capability>::new())
             // Inheritable (passed to child processes)
-            .inheritable(Vec::<Capability>::new())
+            .inheritable(HashSet::<Capability>::new())
             // Permitted (what can be gained)
-            .permitted(Vec::<Capability>::new())
+            .permitted(HashSet::<Capability>::new())
             // Ambient (automatically gained)
-            .ambient(Vec::<Capability>::new())
+            .ambient(HashSet::<Capability>::new())
             .build()
             .map_err(|e| CratonsError::Container(format!("failed to build capabilities: {}", e)))?;
 
@@ -434,6 +492,7 @@ impl OciSpecGenerator {
 mod tests {
     use super::*;
     use crate::config::{Mount, ResourceLimits, SandboxUser};
+    use oci_spec::runtime::LinuxSeccompAction;
     use std::path::PathBuf;
 
     /// M-17: Test OCI spec generation with default config
@@ -497,6 +556,51 @@ mod tests {
         if let Some(cpu) = resources.cpu() {
             assert_eq!(cpu.shares(), Some(512));
         }
+    }
+
+    /// Pids cgroup limit wires through to `LinuxResources.pids`. Regression
+    /// guard for the previously-silent drop of `ResourceLimits::pids`.
+    #[test]
+    fn pids_limit_wires_through_to_linux_resources() {
+        let limits = ResourceLimits {
+            pids: Some(100),
+            ..Default::default()
+        };
+        let config = SandboxConfig::new(vec!["build".into()]).with_limits(limits);
+        let spec = OciSpecGenerator::generate(&config, &PathBuf::from("/tmp/rootfs")).unwrap();
+        let resources = spec
+            .linux()
+            .as_ref()
+            .and_then(|l| l.resources().clone())
+            .expect("resources present when pids set");
+        let pids = resources.pids().expect("pids cgroup present");
+        assert_eq!(pids.limit(), 100);
+    }
+
+    /// fsize and nofile wire through as POSIX rlimits on the process spec.
+    /// Regression guard — these were previously defined on `ResourceLimits`
+    /// but never propagated to the OCI spec.
+    #[test]
+    fn fsize_and_nofile_wire_through_as_posix_rlimits() {
+        let limits = ResourceLimits {
+            nofile: Some(1024),
+            fsize: Some(10 * 1024 * 1024),
+            ..Default::default()
+        };
+        let config = SandboxConfig::new(vec!["build".into()]).with_limits(limits);
+        let spec = OciSpecGenerator::generate(&config, &PathBuf::from("/tmp/rootfs")).unwrap();
+        let process = spec.process().as_ref().expect("process present");
+        let rlimits = process.rlimits().as_ref().expect("rlimits present");
+        let has_nofile = rlimits.iter().any(|r| {
+            matches!(r.typ(), PosixRlimitType::RlimitNofile) && r.hard() == 1024 && r.soft() == 1024
+        });
+        let has_fsize = rlimits.iter().any(|r| {
+            matches!(r.typ(), PosixRlimitType::RlimitFsize)
+                && r.hard() == 10 * 1024 * 1024
+                && r.soft() == 10 * 1024 * 1024
+        });
+        assert!(has_nofile, "RLIMIT_NOFILE should be wired through");
+        assert!(has_fsize, "RLIMIT_FSIZE should be wired through");
     }
 
     /// M-17: Test seccomp profile is applied

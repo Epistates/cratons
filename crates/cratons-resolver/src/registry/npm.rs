@@ -257,19 +257,24 @@ impl RegistryClient for NpmClient {
                     npm_meta.dist.integrity.clone()
                 }
             }
-        } else if !npm_meta.dist.shasum.is_empty() {
-            // shasum is sha1 in hex format
-            match normalize_checksum_format(&format!("sha1-{}", npm_meta.dist.shasum)) {
-                Ok(normalized) => normalized,
-                Err(e) => {
-                    warn!(
-                        "Failed to normalize npm shasum for {}@{}: {}",
-                        name, version, e
-                    );
-                    format!("sha1-{}", npm_meta.dist.shasum)
-                }
-            }
         } else {
+            // SECURITY: npm registry metadata may omit the modern `integrity`
+            // field for very old packages or non-npmjs.org mirrors, leaving
+            // only the legacy `shasum` (SHA-1 hex). SHA-1 is chosen-prefix
+            // collision-vulnerable (SHAttered) and must not be silently
+            // accepted. We drop to empty integrity and emit a structured
+            // warning; the installer's `IntegrityPolicy` (default
+            // `Required`) will then fail closed unless an operator has
+            // explicitly allowlisted npm via
+            // `RequiredWithEcosystemAllowlist`, which is the documented
+            // opt-in path for this trade-off.
+            if !npm_meta.dist.shasum.is_empty() {
+                warn!(
+                    target: "cratons::security",
+                    "integrity-degraded: npm metadata for {}@{} omits `integrity` field and only provides legacy SHA-1 `shasum`; ignoring shasum and leaving integrity empty. Install will fail under IntegrityPolicy::Required unless npm is explicitly allowlisted.",
+                    name, version
+                );
+            }
             String::new()
         };
 

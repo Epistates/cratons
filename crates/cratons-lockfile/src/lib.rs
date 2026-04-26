@@ -809,9 +809,13 @@ impl Lockfile {
     #[must_use]
     pub fn generate_signing_keypair() -> ([u8; 32], [u8; 32]) {
         use ed25519_dalek::SigningKey;
-        use rand::rngs::OsRng;
+        use rand::{TryRng, rngs::SysRng};
 
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let mut seed = [0u8; 32];
+        SysRng
+            .try_fill_bytes(&mut seed)
+            .expect("failed to generate Ed25519 signing key from OS CSPRNG");
+        let signing_key = SigningKey::from_bytes(&seed);
         let verifying_key = signing_key.verifying_key();
 
         (signing_key.to_bytes(), verifying_key.to_bytes())

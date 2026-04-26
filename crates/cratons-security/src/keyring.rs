@@ -94,15 +94,33 @@ pub struct MavenTrustConfig {
 impl MavenTrustConfig {
     /// Parse the config from a TOML file. Returns the default (empty) config
     /// on `ENOENT` so callers can cheaply probe the user keyring location.
+    ///
+    /// Every `trusted-keys[].fingerprint` is normalized at load time via
+    /// [`normalize_fingerprint`], so malformed entries (non-hex chars,
+    /// wrong length, v3 fingerprints) surface as a config error at
+    /// startup instead of at first install.
     pub fn load_or_default(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(contents) => toml::from_str(&contents).map_err(|e| {
-                CratonsError::Config(format!(
-                    "Failed to parse Maven trust config {}: {}",
-                    path.display(),
-                    e
-                ))
-            }),
+            Ok(contents) => {
+                let mut cfg: Self = toml::from_str(&contents).map_err(|e| {
+                    CratonsError::Config(format!(
+                        "Failed to parse Maven trust config {}: {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
+                for entry in &mut cfg.trusted_keys {
+                    entry.fingerprint = normalize_fingerprint(&entry.fingerprint).map_err(|e| {
+                        CratonsError::Config(format!(
+                            "Invalid fingerprint for group-id {:?} in {}: {}",
+                            entry.group_id,
+                            path.display(),
+                            e
+                        ))
+                    })?;
+                }
+                Ok(cfg)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(CratonsError::Config(format!(
                 "Failed to read Maven trust config {}: {}",
@@ -153,6 +171,21 @@ pub struct KeyStore {
 impl KeyStore {
     /// Open the default key cache at `~/.cache/cratons/keys/pgp/`.
     pub fn open_default(client: reqwest::Client) -> Result<Self> {
+        Self::open_with_keyservers(
+            client,
+            DEFAULT_KEYSERVERS.iter().map(|s| s.to_string()).collect(),
+        )
+    }
+
+    /// Open the default key cache with a caller-supplied keyserver list.
+    ///
+    /// This is the production path for Maven verification: project/user
+    /// `keyservers = [...]` overrides must affect network lookups, not just
+    /// parsing/tests. An empty list falls back to the compiled defaults.
+    pub fn open_with_keyservers(
+        client: reqwest::Client,
+        mut keyservers: Vec<String>,
+    ) -> Result<Self> {
         let base = dirs::cache_dir().ok_or_else(|| {
             CratonsError::Config("Cannot determine user cache directory".to_string())
         })?;
@@ -164,9 +197,12 @@ impl KeyStore {
                 e
             ))
         })?;
+        if keyservers.is_empty() {
+            keyservers = DEFAULT_KEYSERVERS.iter().map(|s| s.to_string()).collect();
+        }
         Ok(Self {
             cache_dir,
-            keyservers: DEFAULT_KEYSERVERS.iter().map(|s| s.to_string()).collect(),
+            keyservers,
             client,
         })
     }
@@ -447,9 +483,32 @@ fingerprint = "1122 3344 5566 7788 9900 AABB CCDD EEFF 0011 2233"
             cfg.trusted_keys[0].fingerprint,
             "AABBCCDDEEFF00112233445566778899AABBCCDD"
         );
-        // Raw fingerprint with spaces is preserved in the config — it's the
-        // caller's job to normalize before comparison (via
-        // `normalize_fingerprint`).
+        // Fingerprints are normalized at parse time: spaces stripped and
+        // hex uppercased, so comparisons elsewhere can assume canonical form.
+        assert_eq!(
+            cfg.trusted_keys[1].fingerprint,
+            "11223344556677889900AABBCCDDEEFF00112233"
+        );
+    }
+
+    #[test]
+    fn load_or_default_rejects_malformed_fingerprint() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("maven.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[trusted-keys]]
+group-id = "org.bad.*"
+fingerprint = "NOT-A-VALID-FINGERPRINT"
+"#,
+        )
+        .unwrap();
+        let err = MavenTrustConfig::load_or_default(&path).unwrap_err();
+        assert!(
+            format!("{err}").contains("Invalid fingerprint"),
+            "expected fingerprint parse error, got: {err}"
+        );
     }
 
     #[test]

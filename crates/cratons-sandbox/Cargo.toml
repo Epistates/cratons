@@ -19,9 +19,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tempfile = { workspace = true }
-uuid = { version = "1.22", features = ["v4"] }
+uuid = { version = "1.23", features = ["v4"] }
 dirs = "6.0"
-which = "8.0.0"
+which = "8.0.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -36,9 +36,6 @@ features = ["resource"]
 nix = { version = "0.31", features = ["process", "signal", "user", "mount", "sched", "fs", "resource"] }
 oci-spec = { workspace = true }
 caps = "0.5"
-libcontainer = { workspace = true }
-libcgroups = { workspace = true }
-libseccomp = { workspace = true }
 
 # Windows-specific
 [target.'cfg(target_os = "windows")'.dependencies]

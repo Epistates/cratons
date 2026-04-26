@@ -87,6 +87,30 @@ pub struct ObservabilityConfig {
     pub log_file: Option<PathBuf>,
     /// Log format: "text" or "json".
     pub log_format: Option<String>,
+    /// Resolved telemetry settings from the layered config (defaults →
+    /// system → user → project → env → corp). When `enabled` is true and
+    /// `endpoint` is set, an OTLP span exporter is constructed with the
+    /// supplied `service_name`. The legacy `OTEL_EXPORTER_OTLP_ENDPOINT`
+    /// env var still works as a fallback for callers that bypass the
+    /// config layer.
+    pub telemetry: Option<TelemetrySettings>,
+}
+
+/// Telemetry settings as resolved by the layered cratons `Config`.
+///
+/// Mirrors `cratons::config::TelemetryConfig` but lives here so the
+/// observability layer doesn't need to depend on the wider config module
+/// for testing.
+#[derive(Debug, Clone)]
+pub struct TelemetrySettings {
+    /// Whether telemetry is enabled at all. When `false`, no OTLP exporter
+    /// is constructed regardless of `endpoint`.
+    pub enabled: bool,
+    /// OTLP endpoint URL (e.g. `https://otel-collector.internal:4317`).
+    /// Required when `enabled` is true.
+    pub endpoint: Option<String>,
+    /// `service.name` resource attribute on emitted spans.
+    pub service_name: String,
 }
 
 impl ObservabilityConfig {
@@ -157,15 +181,42 @@ pub fn init(config: ObservabilityConfig) -> Result<()> {
 
     let registry = tracing_subscriber::registry().with(filter);
 
-    // Configure OpenTelemetry if enabled
-    let otel_layer = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
+    // Configure OpenTelemetry. Resolution order:
+    //
+    //   1. `config.telemetry` (the parsed `[telemetry]` section from the
+    //      cratons layered config — defaults → system → user → project →
+    //      env → corp). When `enabled` is true, the configured `endpoint`
+    //      is passed to the OTLP builder directly and the configured
+    //      `service_name` is recorded on the resource.
+    //   2. Legacy `OTEL_EXPORTER_OTLP_ENDPOINT` env var as a fallback for
+    //      operators who haven't migrated to the config-file path yet.
+    //
+    // Previously this branch only honored (2), so the `[telemetry]` block
+    // in `/etc/cratons/config.toml` (and corp policy files) was silently
+    // ignored — an SRE could set `endpoint = "..."` in policy and get no
+    // traces. The config now flows through end-to-end.
+    let (otlp_endpoint, service_name) = match &config.telemetry {
+        Some(t) if t.enabled && t.endpoint.is_some() => {
+            (t.endpoint.clone(), t.service_name.clone())
+        }
+        _ => (
+            std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
+            "cratons".to_string(),
+        ),
+    };
+
+    let otel_layer = if otlp_endpoint.is_some() {
+        use opentelemetry_otlp::WithExportConfig;
+        let mut builder = opentelemetry_otlp::SpanExporter::builder().with_tonic();
+        if let Some(endpoint) = &otlp_endpoint {
+            builder = builder.with_endpoint(endpoint.clone());
+        }
+        let exporter = builder
             .build()
             .map_err(|e| miette!("failed to build otel exporter: {}", e))?;
 
         let resource = Resource::builder()
-            .with_service_name("cratons")
+            .with_service_name(service_name.clone())
             .with_attribute(opentelemetry::KeyValue::new(
                 "service.version",
                 env!("CARGO_PKG_VERSION"),
@@ -179,7 +230,7 @@ pub fn init(config: ObservabilityConfig) -> Result<()> {
 
         global::set_tracer_provider(provider.clone());
 
-        Some(tracing_opentelemetry::layer().with_tracer(provider.tracer("cratons")))
+        Some(tracing_opentelemetry::layer().with_tracer(provider.tracer(service_name)))
     } else {
         None
     };
