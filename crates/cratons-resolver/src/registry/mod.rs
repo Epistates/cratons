@@ -54,10 +54,7 @@ pub const MAX_REGISTRY_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// [`MAX_REGISTRY_DOWNLOAD_BYTES`]. Honors `Content-Length` if the
 /// server sets it (early reject) and re-checks while streaming to
 /// catch servers that lie about the length.
-pub(crate) async fn collect_bounded(
-    response: reqwest::Response,
-    package: &str,
-) -> Result<Vec<u8>> {
+pub(crate) async fn collect_bounded(response: reqwest::Response, package: &str) -> Result<Vec<u8>> {
     if let Some(content_length) = response.content_length() {
         if content_length > MAX_REGISTRY_DOWNLOAD_BYTES {
             return Err(CratonsError::Network(format!(
@@ -70,8 +67,8 @@ pub(crate) async fn collect_bounded(
     let mut buf = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|e| CratonsError::Network(format!("Failed to read response: {}", e)))?;
+        let chunk =
+            chunk.map_err(|e| CratonsError::Network(format!("Failed to read response: {}", e)))?;
         let next_len = buf.len() as u64 + chunk.len() as u64;
         if next_len > MAX_REGISTRY_DOWNLOAD_BYTES {
             return Err(CratonsError::Network(format!(

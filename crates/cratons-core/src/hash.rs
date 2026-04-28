@@ -434,7 +434,12 @@ mod tests {
     fn test_hash_parse_rejects_garbage() {
         assert!(ContentHash::parse("sha256:not-hex").is_err());
         assert!(ContentHash::parse("sha256:abc123").is_err()); // wrong length
-        assert!(ContentHash::parse("sha512:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9").is_err()); // sha256 length under sha512 prefix
+        assert!(
+            ContentHash::parse(
+                "sha512:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+            )
+            .is_err()
+        ); // sha256 length under sha512 prefix
         assert!(ContentHash::parse("sha256:☃☃").is_err()); // non-ASCII (would have panicked in short())
     }
 

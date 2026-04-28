@@ -147,11 +147,9 @@ impl Version {
                 // (path-traversal sequences, control chars) under a
                 // `Pep440` variant and have them flow into URL/path
                 // construction unchecked.
-                Pep440Version::from_str(s).map_err(|e| {
-                    CratonsError::InvalidVersion {
-                        version: s.to_string(),
-                        message: format!("invalid PEP 440 version: {e}"),
-                    }
+                Pep440Version::from_str(s).map_err(|e| CratonsError::InvalidVersion {
+                    version: s.to_string(),
+                    message: format!("invalid PEP 440 version: {e}"),
                 })?;
                 Ok(Self::Pep440(s.to_string()))
             }

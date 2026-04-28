@@ -378,12 +378,15 @@ impl Dependency {
                     // `sha256 = "not-a-hash"` would pass manifest
                     // validation and only fail at install time with a
                     // confusing checksum-mismatch error.
-                    ContentHash::parse(&format!("sha256:{}", sha256.to_lowercase()))
-                        .map_err(|e| CratonsError::Manifest(format!(
-                            "URL dependency '{}' has invalid sha256: {}. \
+                    ContentHash::parse(&format!("sha256:{}", sha256.to_lowercase())).map_err(
+                        |e| {
+                            CratonsError::Manifest(format!(
+                                "URL dependency '{}' has invalid sha256: {}. \
                              Expected 64 lowercase hex chars.",
-                            name, e
-                        )))?;
+                                name, e
+                            ))
+                        },
+                    )?;
                 }
 
                 // Validate path source.
@@ -748,8 +751,7 @@ mod tests {
             .validate(Ecosystem::Url, "my-dep")
             .expect_err("short sha256 must be rejected");
         assert!(
-            err.to_string().contains("invalid sha256")
-                || err.to_string().contains("hex chars"),
+            err.to_string().contains("invalid sha256") || err.to_string().contains("hex chars"),
             "expected hex-validation error, got: {err}"
         );
     }
@@ -765,8 +767,7 @@ mod tests {
             .validate(Ecosystem::Url, "my-dep")
             .expect_err("non-hex sha256 must be rejected");
         assert!(
-            err.to_string().contains("invalid sha256")
-                || err.to_string().contains("hex"),
+            err.to_string().contains("invalid sha256") || err.to_string().contains("hex"),
             "expected hex-validation error, got: {err}"
         );
     }

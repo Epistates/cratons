@@ -284,10 +284,8 @@ impl Sandbox for QemuSandbox {
                 return Ok(SandboxResult {
                     exit_code: -1,
                     stdout: Vec::new(),
-                    stderr: format!(
-                        "QEMU sandbox exceeded wall-clock timeout of {qemu_timeout:?}"
-                    )
-                    .into_bytes(),
+                    stderr: format!("QEMU sandbox exceeded wall-clock timeout of {qemu_timeout:?}")
+                        .into_bytes(),
                     duration: start.elapsed(),
                     timed_out: true,
                     resource_exceeded: false,
@@ -310,9 +308,7 @@ impl Sandbox for QemuSandbox {
             match parse_guest_exit_code(&stdout, &nonce) {
                 Some(code) => code,
                 None => {
-                    debug!(
-                        "QEMU guest did not emit nonce-tagged exit code; treating as failure"
-                    );
+                    debug!("QEMU guest did not emit nonce-tagged exit code; treating as failure");
                     -1
                 }
             }

@@ -508,8 +508,8 @@ pub fn safe_unpack_tar_with_strip<R: Read>(
                     }
                 };
 
-                let source = validate_hard_link_target(dest, &target, &sanitized_path).map_err(
-                    |e| {
+                let source =
+                    validate_hard_link_target(dest, &target, &sanitized_path).map_err(|e| {
                         CratonsError::Io(io::Error::new(
                             io::ErrorKind::InvalidData,
                             format!(
@@ -518,8 +518,7 @@ pub fn safe_unpack_tar_with_strip<R: Read>(
                                 target.display()
                             ),
                         ))
-                    },
-                )?;
+                    })?;
 
                 if let Some(parent) = full_path.parent() {
                     fs::create_dir_all(parent)?;
