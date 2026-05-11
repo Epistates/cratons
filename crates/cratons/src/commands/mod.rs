@@ -557,16 +557,32 @@ async fn install_async(
     // run. This is the single write point for lockfile `[pgp-trust]`
     // updates; keeping it in the CLI layer ensures that a failed install
     // never leaves the lockfile partially modified on disk.
-    if !result.pgp_trust_updates.is_empty() {
+    if !result.pgp_trust_updates.is_empty() || !result.content_hash_updates.is_empty() {
         let mut updated_lockfile = lockfile.clone();
         let pin_count = result.pgp_trust_updates.len();
         for (group_id, fingerprint) in result.pgp_trust_updates.drain() {
             updated_lockfile.record_pgp_trust(group_id, fingerprint);
         }
+        let hash_count = result.content_hash_updates.len();
+        for ((ecosystem, name, version), hash) in result.content_hash_updates.drain() {
+            if let Some(pkg) = updated_lockfile.packages.iter_mut().find(|pkg| {
+                pkg.ecosystem == ecosystem && pkg.name == name && pkg.version == version
+            }) {
+                pkg.resolved_hash = Some(hash);
+            }
+        }
         updated_lockfile
             .save(&lockfile_path)
-            .map_err(|e| miette::miette!("Failed to persist PGP TOFU pins: {}", e))?;
-        info!(count = pin_count, "recorded new PGP TOFU pins in lockfile");
+            .map_err(|e| miette::miette!("Failed to persist lockfile install updates: {}", e))?;
+        if pin_count > 0 {
+            info!(count = pin_count, "recorded new PGP TOFU pins in lockfile");
+        }
+        if hash_count > 0 {
+            info!(
+                count = hash_count,
+                "recorded package CAS hashes in lockfile"
+            );
+        }
     }
 
     // Print summary

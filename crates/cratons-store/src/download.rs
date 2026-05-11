@@ -41,6 +41,8 @@ use crate::toolchain::{Toolchain, ToolchainStore};
 /// SECURITY: Update this when a newer verified release is available.
 /// Last verified: 2025-12-31
 const PYTHON_BUILD_STANDALONE_FALLBACK: &str = "20251215";
+const MAX_TOOLCHAIN_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_HASH_RESPONSE_BYTES: u64 = 16 * 1024;
 
 /// Request for downloading a specific toolchain.
 #[derive(Debug, Clone)]
@@ -764,17 +766,38 @@ impl ToolchainDownloader {
 
     /// Fetch a simple hash file (single line with just the hash).
     async fn fetch_simple_hash(&self, url: &str) -> Result<String> {
-        let response = self
+        let mut response = self
             .client
             .get(url)
             .send()
             .await
             .map_err(|e| CratonsError::Network(e.to_string()))?;
 
-        let text = response
-            .text()
+        if let Some(content_length) = response.content_length() {
+            if content_length > MAX_HASH_RESPONSE_BYTES {
+                return Err(CratonsError::Network(format!(
+                    "Hash response from {url} exceeds maximum {MAX_HASH_RESPONSE_BYTES} bytes"
+                )));
+            }
+        }
+
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|e| CratonsError::Network(e.to_string()))?;
+            .map_err(|e| CratonsError::Network(e.to_string()))?
+        {
+            let next_len = bytes.len() as u64 + chunk.len() as u64;
+            if next_len > MAX_HASH_RESPONSE_BYTES {
+                return Err(CratonsError::Network(format!(
+                    "Hash response from {url} exceeded maximum {MAX_HASH_RESPONSE_BYTES} bytes"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+
+        let text = String::from_utf8(bytes)
+            .map_err(|e| CratonsError::Network(format!("Hash response was not UTF-8: {e}")))?;
 
         Ok(text.split_whitespace().next().unwrap_or("").to_string())
     }
@@ -787,7 +810,7 @@ impl ToolchainDownloader {
     /// to extraction without writing to disk to prevent TOCTOU attacks.
     #[instrument(skip(self, info), fields(url = %info.url))]
     async fn download_and_verify(&self, info: &DownloadInfo) -> Result<bytes::Bytes> {
-        let response = self
+        let mut response = self
             .client
             .get(&info.url)
             .send()
@@ -802,12 +825,32 @@ impl ToolchainDownloader {
         }
 
         let total_size = response.content_length();
+        if let Some(content_length) = total_size {
+            if content_length > MAX_TOOLCHAIN_DOWNLOAD_BYTES {
+                return Err(CratonsError::Network(format!(
+                    "Refusing to download {}: Content-Length {} exceeds maximum {} bytes",
+                    info.url, content_length, MAX_TOOLCHAIN_DOWNLOAD_BYTES
+                )));
+            }
+        }
         debug!(size = ?total_size, "Starting download");
 
-        let bytes = response
-            .bytes()
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|e| CratonsError::Network(e.to_string()))?;
+            .map_err(|e| CratonsError::Network(e.to_string()))?
+        {
+            let next_len = bytes.len() as u64 + chunk.len() as u64;
+            if next_len > MAX_TOOLCHAIN_DOWNLOAD_BYTES {
+                return Err(CratonsError::Network(format!(
+                    "Refusing to download {}: response exceeded maximum {} bytes",
+                    info.url, MAX_TOOLCHAIN_DOWNLOAD_BYTES
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let bytes = bytes::Bytes::from(bytes);
 
         // Verify checksum if available
         if let Some(expected) = &info.expected_hash {

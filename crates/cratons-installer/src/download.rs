@@ -1,7 +1,7 @@
 //! Package downloading with parallel fetch and integrity verification.
 
 use crate::download_diagnostics::DownloadDiagnostics;
-use cratons_core::{CratonsError, Ecosystem, Result};
+use cratons_core::{ContentHash, CratonsError, Ecosystem, Result};
 use cratons_lockfile::LockedPackage;
 use cratons_store::Store;
 use futures::stream::{self, StreamExt};
@@ -34,6 +34,8 @@ const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub struct DownloadResult {
     /// Final on-disk path of the stored artifact (in the CAS).
     pub path: PathBuf,
+    /// Blake3 CAS hash of the stored archive.
+    pub content_hash: ContentHash,
     /// Number of bytes downloaded over the network.
     pub bytes_downloaded: u64,
     /// Optional TOFU pin: `(group_id, fingerprint)`.
@@ -431,6 +433,7 @@ impl PackageDownloader {
 
         Ok(DownloadResult {
             path: stored_path,
+            content_hash: hash,
             bytes_downloaded,
             tofu_pin,
         })
@@ -535,7 +538,11 @@ impl PackageDownloader {
     ///
     /// Supports SHA1, SHA256, and SHA512 in base64 format.
     /// All integrity hashes should be normalized to base64 at registry fetch time.
-    fn verify_download_integrity(&self, pkg: &LockedPackage, bytes: &[u8]) -> Result<()> {
+    pub(crate) fn verify_download_integrity(
+        &self,
+        pkg: &LockedPackage,
+        bytes: &[u8],
+    ) -> Result<()> {
         use base64::{Engine, engine::general_purpose::STANDARD};
         use sha1::Sha1;
         use sha2::{Digest, Sha256, Sha512};
@@ -641,7 +648,7 @@ mod tests {
             ecosystem: Ecosystem::Npm,
             source: "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz".to_string(),
             integrity: String::new(),
-            resolved_hash: ContentHash::blake3("test".to_string()),
+            resolved_hash: Some(ContentHash::blake3("test".to_string())),
             direct: true,
             features: vec![],
             dependencies: vec![],
@@ -655,7 +662,7 @@ mod tests {
             ecosystem: Ecosystem::Npm,
             source: "https://registry.npmjs.org/@types/node/-/node-20.0.0.tgz".to_string(),
             integrity: String::new(),
-            resolved_hash: ContentHash::blake3("test".to_string()),
+            resolved_hash: Some(ContentHash::blake3("test".to_string())),
             direct: true,
             features: vec![],
             dependencies: vec![],
@@ -696,7 +703,7 @@ mod tests {
             ecosystem: Ecosystem::Go,
             source: "https://proxy.golang.org/example.com/mod/@v/v0.1.0.zip".to_string(),
             integrity: format!("h1-{}", expected_h1),
-            resolved_hash: ContentHash::blake3("test".to_string()),
+            resolved_hash: Some(ContentHash::blake3("test".to_string())),
             direct: true,
             features: vec![],
             dependencies: vec![],
@@ -734,7 +741,7 @@ mod tests {
             ecosystem: Ecosystem::Go,
             source: "https://proxy.golang.org/example.com/mod/@v/v0.1.0.zip".to_string(),
             integrity: "h1-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
-            resolved_hash: ContentHash::blake3("test".to_string()),
+            resolved_hash: Some(ContentHash::blake3("test".to_string())),
             direct: true,
             features: vec![],
             dependencies: vec![],

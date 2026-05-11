@@ -1156,7 +1156,7 @@ mod tests {
             ecosystem: Ecosystem::Npm,
             source: "registry".to_string(),
             integrity: "sha256-123".to_string(),
-            resolved_hash: ContentHash::blake3("lodash".to_string()),
+            resolved_hash: Some(ContentHash::blake3("lodash".to_string())),
             direct: true,
             features: Vec::new(),
             dependencies: Vec::new(),

@@ -138,6 +138,9 @@ impl Dependencies {
         for (name, dep) in &self.maven {
             specs.push(dep.to_spec(Ecosystem::Maven, name)?);
         }
+        for (name, dep) in &self.url {
+            specs.push(dep.to_spec(Ecosystem::Url, name)?);
+        }
 
         Ok(specs)
     }

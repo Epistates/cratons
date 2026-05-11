@@ -1,10 +1,11 @@
 //! Minimal Version Selection algorithm.
 
 use cratons_core::{
-    CratonsError, Ecosystem, HashAlgorithm, Hasher, ResolutionStrategy, Result, Version, VersionReq,
+    CratonsError, Ecosystem, ResolutionStrategy, Result, Version, VersionReq,
+    hash_normalization::normalize_checksum_format,
 };
 use cratons_lockfile::{LOCKFILE_NAME, Lockfile};
-use cratons_manifest::Manifest;
+use cratons_manifest::{Dependency, Manifest};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
@@ -53,12 +54,391 @@ impl Resolver {
         &self.registry
     }
 
+    fn add_url_dependencies(
+        &self,
+        manifest: &Manifest,
+        graph: &mut DependencyGraph,
+        metadata_cache: &mut BTreeMap<(String, Ecosystem, String), PackageMetadata>,
+        requested_optional: &mut HashSet<(Ecosystem, String)>,
+    ) -> Result<()> {
+        for (name, dep) in &manifest.dependencies.url {
+            self.add_url_dependency(
+                name,
+                dep,
+                DependencyKind::Normal,
+                graph,
+                metadata_cache,
+                requested_optional,
+            )?;
+        }
+
+        for (name, dep) in &manifest.optional_dependencies.url {
+            self.add_url_dependency(
+                name,
+                dep,
+                DependencyKind::Optional,
+                graph,
+                metadata_cache,
+                requested_optional,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn add_url_dependency(
+        &self,
+        name: &str,
+        dep: &Dependency,
+        kind: DependencyKind,
+        graph: &mut DependencyGraph,
+        metadata_cache: &mut BTreeMap<(String, Ecosystem, String), PackageMetadata>,
+        requested_optional: &mut HashSet<(Ecosystem, String)>,
+    ) -> Result<()> {
+        let Dependency::Detailed(detail) = dep else {
+            return Err(CratonsError::Manifest(format!(
+                "URL dependency '{name}' must use detailed syntax with url and sha256"
+            )));
+        };
+
+        let url = detail.url.clone().ok_or_else(|| {
+            CratonsError::Manifest(format!("URL dependency '{name}' is missing url"))
+        })?;
+        let sha256 = detail.sha256.as_ref().ok_or_else(|| {
+            CratonsError::Manifest(format!("URL dependency '{name}' is missing sha256"))
+        })?;
+        let integrity = normalize_checksum_format(&format!("sha256-{sha256}"))?;
+        let version = detail
+            .version
+            .clone()
+            .unwrap_or_else(|| "0.0.0".to_string());
+        Version::parse(&version, Ecosystem::Url)?;
+
+        if kind == DependencyKind::Optional {
+            requested_optional.insert((Ecosystem::Url, name.to_string()));
+        }
+
+        graph.add_package(name, Ecosystem::Url);
+        graph.set_versions(name, Ecosystem::Url, vec![version.clone()]);
+        graph.set_resolved_version(name, Ecosystem::Url, version.clone());
+        graph.add_dependency(
+            "__root__",
+            Ecosystem::Npm,
+            name,
+            Ecosystem::Url,
+            detail
+                .version
+                .as_deref()
+                .map(|v| VersionReq::parse(v, Ecosystem::Url))
+                .transpose()?
+                .unwrap_or(VersionReq::Any),
+            true,
+            detail.features.clone(),
+            kind,
+        );
+
+        metadata_cache.insert(
+            (name.to_string(), Ecosystem::Url, version.clone()),
+            PackageMetadata::new(name.to_string(), version, url, integrity),
+        );
+
+        Ok(())
+    }
+
+    async fn hydrate_sat_solution(
+        &self,
+        solution: BTreeMap<(String, Ecosystem), String>,
+        root_deps: &[(String, String, Ecosystem)],
+        graph: &mut DependencyGraph,
+        metadata_cache: &mut BTreeMap<(String, Ecosystem, String), PackageMetadata>,
+    ) -> Result<()> {
+        for ((name, ecosystem), version) in &solution {
+            graph.add_package(name, *ecosystem);
+            graph.set_versions(name, *ecosystem, vec![version.clone()]);
+            graph.set_resolved_version(name, *ecosystem, version.clone());
+            self.fetch_metadata_cached(name, *ecosystem, version, metadata_cache)
+                .await?;
+        }
+
+        for (name, req, ecosystem) in root_deps {
+            graph.add_dependency(
+                "__root__",
+                Ecosystem::Npm,
+                name,
+                *ecosystem,
+                VersionReq::parse(req, *ecosystem)?,
+                true,
+                vec![],
+                DependencyKind::Normal,
+            );
+        }
+
+        for ((name, ecosystem), version) in &solution {
+            let metadata = self
+                .fetch_metadata_cached(name, *ecosystem, version, metadata_cache)
+                .await?;
+            self.add_metadata_edges(name, *ecosystem, &metadata, &solution, graph)?;
+        }
+
+        Ok(())
+    }
+
+    fn add_metadata_edges(
+        &self,
+        name: &str,
+        ecosystem: Ecosystem,
+        metadata: &PackageMetadata,
+        solution: &BTreeMap<(String, Ecosystem), String>,
+        graph: &mut DependencyGraph,
+    ) -> Result<()> {
+        let bundled_set: HashSet<&String> = metadata.bundled_dependencies.iter().collect();
+        for (dep_name, req) in &metadata.dependencies {
+            if bundled_set.contains(dep_name) {
+                continue;
+            }
+            if solution.contains_key(&(dep_name.clone(), ecosystem)) {
+                graph.add_dependency(
+                    name,
+                    ecosystem,
+                    dep_name,
+                    ecosystem,
+                    VersionReq::parse(req, ecosystem)?,
+                    false,
+                    vec![],
+                    DependencyKind::Normal,
+                );
+            }
+        }
+
+        for (dep_name, req) in &metadata.peer_dependencies {
+            let is_optional = metadata
+                .peer_dependencies_meta
+                .get(dep_name)
+                .map(|m| m.optional)
+                .unwrap_or(false);
+            if is_optional || !solution.contains_key(&(dep_name.clone(), ecosystem)) {
+                continue;
+            }
+            graph.add_dependency(
+                name,
+                ecosystem,
+                dep_name,
+                ecosystem,
+                VersionReq::parse(req, ecosystem)?,
+                false,
+                vec![],
+                DependencyKind::Peer,
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn fetch_metadata_cached(
+        &self,
+        name: &str,
+        ecosystem: Ecosystem,
+        version: &str,
+        metadata_cache: &mut BTreeMap<(String, Ecosystem, String), PackageMetadata>,
+    ) -> Result<PackageMetadata> {
+        let metadata_key = (name.to_string(), ecosystem, version.to_string());
+        if let Some(cached) = metadata_cache.get(&metadata_key) {
+            return Ok(cached.clone());
+        }
+
+        let metadata = self
+            .registry
+            .fetch_metadata(ecosystem, name, version)
+            .await
+            .map_err(|e| CratonsError::Registry {
+                registry: ecosystem.to_string(),
+                message: format!("Failed to fetch metadata for {ecosystem}:{name}@{version}: {e}"),
+            })?;
+        metadata_cache.insert(metadata_key, metadata.clone());
+        Ok(metadata)
+    }
+
+    fn select_version(
+        &self,
+        versions: &[String],
+        ecosystem: Ecosystem,
+        name: &str,
+        version_req: &VersionReq,
+        manifest: &Manifest,
+    ) -> Result<String> {
+        let strategy = manifest
+            .resolution
+            .get(&ecosystem)
+            .cloned()
+            .unwrap_or_else(|| ecosystem.default_resolution_strategy());
+
+        let override_req = manifest
+            .overrides
+            .for_ecosystem(ecosystem)
+            .get(name)
+            .and_then(|d| d.version())
+            .map(|v| VersionReq::parse(v, ecosystem))
+            .transpose()?;
+
+        let predicate = |v: &&String| {
+            let ver = match Version::parse(v, ecosystem) {
+                Ok(ver) => ver,
+                Err(_) => return false,
+            };
+
+            override_req.as_ref().unwrap_or(version_req).matches(&ver)
+        };
+
+        let selected = match strategy {
+            ResolutionStrategy::Minimal => versions.iter().find(predicate),
+            ResolutionStrategy::MaxSatisfying => versions.iter().rfind(predicate),
+        };
+
+        selected.cloned().ok_or_else(|| {
+            let available_versions = versions
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let more = if versions.len() > 5 {
+                format!(" (and {} more)", versions.len() - 5)
+            } else {
+                String::new()
+            };
+            CratonsError::NoSatisfyingVersion {
+                package: name.to_string(),
+                constraint: format!("{version_req} (available: {available_versions}{more})"),
+            }
+        })
+    }
+
+    async fn ensure_final_metadata(
+        &self,
+        graph: &mut DependencyGraph,
+        metadata_cache: &mut BTreeMap<(String, Ecosystem, String), PackageMetadata>,
+        manifest: &Manifest,
+        requested_optional: &HashSet<(Ecosystem, String)>,
+    ) -> Result<()> {
+        const MAX_METADATA_FIXPOINT: usize = 128;
+
+        for _ in 0..MAX_METADATA_FIXPOINT {
+            let nodes = graph
+                .packages()
+                .filter_map(|node| {
+                    if node.name == "__root__" {
+                        None
+                    } else {
+                        node.resolved_version
+                            .as_ref()
+                            .map(|version| (node.name.clone(), node.ecosystem, version.clone()))
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let mut changed = false;
+            for (name, ecosystem, version) in nodes {
+                let metadata = self
+                    .fetch_metadata_cached(&name, ecosystem, &version, metadata_cache)
+                    .await?;
+                let bundled_set: HashSet<&String> = metadata.bundled_dependencies.iter().collect();
+
+                for (dep_name, dep_req_str, dep_kind) in metadata
+                    .dependencies
+                    .iter()
+                    .filter(|(dep_name, _)| !bundled_set.contains(dep_name))
+                    .map(|(dep_name, req)| (dep_name, req, DependencyKind::Normal))
+                    .chain(
+                        metadata
+                            .optional_dependencies
+                            .iter()
+                            .filter(|(dep_name, _)| {
+                                requested_optional.contains(&(ecosystem, (*dep_name).clone()))
+                            })
+                            .map(|(dep_name, req)| (dep_name, req, DependencyKind::Optional)),
+                    )
+                    .chain(
+                        metadata
+                            .peer_dependencies
+                            .iter()
+                            .filter_map(|(dep_name, req)| {
+                                let is_optional = metadata
+                                    .peer_dependencies_meta
+                                    .get(dep_name)
+                                    .map(|m| m.optional)
+                                    .unwrap_or(false);
+                                (!is_optional).then_some((dep_name, req, DependencyKind::Peer))
+                            }),
+                    )
+                {
+                    let dep_req = VersionReq::parse(dep_req_str, ecosystem)?;
+
+                    if graph.get_package(dep_name, ecosystem).is_none() {
+                        let versions = self
+                            .registry
+                            .fetch_versions(ecosystem, dep_name)
+                            .await
+                            .map_err(|e| CratonsError::Registry {
+                                registry: ecosystem.to_string(),
+                                message: format!("Failed to fetch versions for {dep_name}: {e}"),
+                            })?;
+                        let selected = self
+                            .select_version(&versions, ecosystem, dep_name, &dep_req, manifest)?;
+                        graph.add_package(dep_name, ecosystem);
+                        graph.set_versions(dep_name, ecosystem, versions);
+                        graph.set_resolved_version(dep_name, ecosystem, selected);
+                        changed = true;
+                    }
+
+                    if !graph.has_dependency_edge(
+                        &name, ecosystem, dep_name, ecosystem, &dep_req, dep_kind,
+                    ) {
+                        graph.add_dependency(
+                            &name,
+                            ecosystem,
+                            dep_name,
+                            ecosystem,
+                            dep_req,
+                            false,
+                            vec![],
+                            dep_kind,
+                        );
+                        changed = true;
+                    }
+                }
+            }
+
+            if changed {
+                self.apply_mvs(graph, manifest)?;
+            } else {
+                return Ok(());
+            }
+        }
+
+        Err(CratonsError::Config(
+            "Resolution metadata fixpoint exceeded maximum iterations".to_string(),
+        ))
+    }
+
     /// Resolve dependencies from a manifest.
     #[tracing::instrument(level = "debug", skip(self, manifest))]
     pub async fn resolve(&self, manifest: &Manifest) -> Result<Resolution> {
         info!("Starting dependency resolution");
         let mut resolution = Resolution::new();
         let mut graph = DependencyGraph::new();
+        let mut metadata_cache: BTreeMap<(String, Ecosystem, String), PackageMetadata> =
+            BTreeMap::new();
+        let mut requested_optional: HashSet<(Ecosystem, String)> = HashSet::new();
+
+        // Add a root node used for direct dependency edges.
+        graph.add_package("__root__", Ecosystem::Npm);
+
+        self.add_url_dependencies(
+            manifest,
+            &mut graph,
+            &mut metadata_cache,
+            &mut requested_optional,
+        )?;
 
         // 1. Hybrid Strategy: Unified SAT Solving for NPM/PyPI
         let sat_ecosystems = [Ecosystem::Npm, Ecosystem::PyPi];
@@ -88,13 +468,17 @@ impl Resolver {
 
         if !sat_roots.is_empty() {
             let sat_resolver = SatResolver::new(self.registry.clone());
+            let sat_roots_for_edges = sat_roots.clone();
 
             match sat_resolver.resolve_multi(sat_roots, strategies).await {
                 Ok(solution) => {
-                    for ((name, ecosystem), version) in solution {
-                        let _idx = graph.add_package(&name, ecosystem);
-                        graph.set_resolved_version(&name, ecosystem, version);
-                    }
+                    self.hydrate_sat_solution(
+                        solution,
+                        &sat_roots_for_edges,
+                        &mut graph,
+                        &mut metadata_cache,
+                    )
+                    .await?;
                 }
                 Err(e) => {
                     return Err(CratonsError::Config(format!(
@@ -110,11 +494,6 @@ impl Resolver {
 
         // Track what we've already processed to avoid cycles
         let mut processed: HashSet<(String, Ecosystem)> = HashSet::new();
-        let mut metadata_cache: BTreeMap<(String, Ecosystem, String), PackageMetadata> =
-            BTreeMap::new();
-
-        // Track which optional dependencies were requested
-        let mut requested_optional: HashSet<(Ecosystem, String)> = HashSet::new();
 
         // Track peer dependency requirements for validation
         let mut peer_requirements: BTreeMap<(Ecosystem, String), Vec<(String, VersionReq)>> =
@@ -130,13 +509,13 @@ impl Resolver {
             DependencyKind,
         )> = VecDeque::new();
 
-        // Add a root node
-        graph.add_package("__root__", Ecosystem::Npm);
-
         // Collect direct dependencies
         for ecosystem in Ecosystem::all() {
-            // Skip if already resolved by SAT
-            if *ecosystem == Ecosystem::Npm || *ecosystem == Ecosystem::PyPi {
+            // Skip if already resolved by SAT or handled as direct URL metadata.
+            if *ecosystem == Ecosystem::Npm
+                || *ecosystem == Ecosystem::PyPi
+                || *ecosystem == Ecosystem::Url
+            {
                 continue;
             }
 
@@ -167,6 +546,9 @@ impl Resolver {
 
         // Collect optional dependencies that are explicitly requested
         for ecosystem in Ecosystem::all() {
+            if *ecosystem == Ecosystem::Url {
+                continue;
+            }
             let opt_deps = manifest.optional_dependencies.for_ecosystem(*ecosystem);
             for (name, dep) in opt_deps {
                 let version_req = dep
@@ -383,30 +765,9 @@ impl Resolver {
             graph.set_resolved_version(&name, ecosystem, version.clone());
 
             // Fetch metadata to get transitive dependencies
-            let metadata_key = (name.clone(), ecosystem, version.clone());
-            let metadata = if let Some(cached) = metadata_cache.get(&metadata_key) {
-                cached.clone()
-            } else {
-                match self
-                    .registry
-                    .fetch_metadata(ecosystem, &name, &version)
-                    .await
-                {
-                    Ok(m) => {
-                        metadata_cache.insert(metadata_key, m.clone());
-                        m
-                    }
-                    Err(e) => {
-                        return Err(CratonsError::Registry {
-                            registry: ecosystem.to_string(),
-                            message: format!(
-                                "Failed to fetch metadata for {}:{}@{}: {}",
-                                ecosystem, name, version, e
-                            ),
-                        });
-                    }
-                }
-            };
+            let metadata = self
+                .fetch_metadata_cached(&name, ecosystem, &version, &mut metadata_cache)
+                .await?;
 
             // M-16: Create set of bundled dependencies to skip from resolution
             // Bundled dependencies are included in the package tarball, so don't resolve them separately
@@ -552,53 +913,66 @@ impl Resolver {
         // Apply MVS to handle any version conflicts
         self.apply_mvs(&mut graph, manifest)?;
 
+        self.ensure_final_metadata(
+            &mut graph,
+            &mut metadata_cache,
+            manifest,
+            &requested_optional,
+        )
+        .await?;
+
+        if graph.has_cycles() {
+            if let Some(cycle_description) = graph.describe_cycles() {
+                return Err(CratonsError::DependencyCycle(cycle_description));
+            }
+            return Err(CratonsError::DependencyCycle(
+                "Circular dependencies detected in the dependency graph".to_string(),
+            ));
+        }
+
         // Convert graph to resolution with full metadata
-        for node in graph.packages() {
-            if node.name == "__root__" {
-                continue;
-            }
+        let final_nodes = graph
+            .packages()
+            .filter_map(|node| {
+                if node.name == "__root__" {
+                    None
+                } else {
+                    node.resolved_version
+                        .as_ref()
+                        .map(|version| (node.name.clone(), node.ecosystem, version.clone()))
+                }
+            })
+            .collect::<Vec<_>>();
 
-            if let Some(ref version) = node.resolved_version {
-                // Get cached metadata for integrity hash
-                let metadata_key = (node.name.clone(), node.ecosystem, version.clone());
-                let integrity = metadata_cache
-                    .get(&metadata_key)
-                    .map(|m| m.integrity.clone())
-                    .unwrap_or_default();
+        for (name, ecosystem, version) in final_nodes {
+            let metadata = self
+                .fetch_metadata_cached(&name, ecosystem, &version, &mut metadata_cache)
+                .await?;
 
-                let dist_url = metadata_cache
-                    .get(&metadata_key)
-                    .map(|m| m.dist_url.clone())
-                    .unwrap_or_else(|| node.ecosystem.default_registry().to_string());
+            let resolved = ResolvedPackage {
+                name: name.clone(),
+                version,
+                ecosystem,
+                source: metadata.dist_url,
+                integrity: metadata.integrity,
+                resolved_hash: None,
+                direct: graph
+                    .dependents(&name, ecosystem)
+                    .iter()
+                    .any(|(_, e)| e.direct),
+                features: vec![],
+                dependencies: graph
+                    .dependencies(&name, ecosystem)
+                    .iter()
+                    .filter_map(|(dep, _)| {
+                        dep.resolved_version
+                            .as_ref()
+                            .map(|v| (dep.name.clone(), v.clone()))
+                    })
+                    .collect(),
+            };
 
-                let resolved = ResolvedPackage {
-                    name: node.name.clone(),
-                    version: version.clone(),
-                    ecosystem: node.ecosystem,
-                    source: dist_url,
-                    integrity,
-                    resolved_hash: Hasher::hash_bytes(
-                        HashAlgorithm::Blake3,
-                        format!("{}@{}", node.name, version).as_bytes(),
-                    ),
-                    direct: graph
-                        .dependents(&node.name, node.ecosystem)
-                        .iter()
-                        .any(|(_, e)| e.direct),
-                    features: vec![],
-                    dependencies: graph
-                        .dependencies(&node.name, node.ecosystem)
-                        .iter()
-                        .filter_map(|(dep, _)| {
-                            dep.resolved_version
-                                .as_ref()
-                                .map(|v| (dep.name.clone(), v.clone()))
-                        })
-                        .collect(),
-                };
-
-                resolution.packages.push(resolved);
-            }
+            resolution.packages.push(resolved);
         }
 
         resolution.graph = graph;
@@ -646,20 +1020,51 @@ impl Resolver {
             }
         }
 
-        // Check for new/updated dependencies in manifest
-        for ecosystem in Ecosystem::all() {
-            let deps = manifest.dependencies.for_ecosystem(*ecosystem);
-            for (name, _dep) in deps {
-                // If not in lockfile, resolve it
-                if lockfile.find_direct_package(name, *ecosystem).is_none() {
-                    // Would fetch and resolve new dependency
-                    debug!("New dependency not in lockfile: {}", name);
+        for pkg in &lockfile.packages {
+            for dep in &pkg.dependencies {
+                if let Some(dep_pkg) =
+                    lockfile.find_package_exact(&dep.name, pkg.ecosystem, &dep.version)
+                {
+                    graph.add_dependency(
+                        &pkg.name,
+                        pkg.ecosystem,
+                        &dep_pkg.name,
+                        dep_pkg.ecosystem,
+                        VersionReq::parse(&dep.version, dep_pkg.ecosystem)
+                            .unwrap_or_else(|_| VersionReq::Exact(dep.version.clone())),
+                        false,
+                        vec![],
+                        DependencyKind::Normal,
+                    );
                 }
             }
         }
 
-        // Verify locked versions still satisfy manifest requirements
-        // (simplified - full implementation would check version constraints)
+        // Check for new/updated dependencies in manifest
+        for ecosystem in Ecosystem::all() {
+            let deps = manifest.dependencies.for_ecosystem(*ecosystem);
+            for (name, dep) in deps {
+                let Some(locked) = lockfile.find_direct_package(name, *ecosystem) else {
+                    return Err(CratonsError::Lockfile(format!(
+                        "Lockfile is missing direct dependency {ecosystem}:{name}"
+                    )));
+                };
+
+                if let Some(req_str) = dep.version() {
+                    let req = VersionReq::parse(req_str, *ecosystem)?;
+                    let version = Version::parse(&locked.version, *ecosystem)?;
+                    if !req.matches(&version) {
+                        return Err(CratonsError::NoSatisfyingVersion {
+                            package: name.clone(),
+                            constraint: format!(
+                                "locked version {} does not satisfy manifest requirement {}",
+                                locked.version, req
+                            ),
+                        });
+                    }
+                }
+            }
+        }
 
         resolution.graph = graph;
         Ok(resolution)

@@ -32,9 +32,9 @@ fn lockfile_with_empty_integrity(ecosystem: Ecosystem) -> Lockfile {
         source: "https://example.invalid/test-package-1.0.0.tgz".to_string(),
         // Intentionally empty — this is the condition under test.
         integrity: String::new(),
-        resolved_hash: ContentHash::blake3(
+        resolved_hash: Some(ContentHash::blake3(
             "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-        ),
+        )),
         direct: true,
         features: Vec::new(),
         dependencies: Vec::<DependencyRef>::new(),

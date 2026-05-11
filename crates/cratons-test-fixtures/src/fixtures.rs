@@ -318,7 +318,7 @@ pub mod lockfiles {
             ecosystem: Ecosystem::Npm,
             source: "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz".to_string(),
             integrity: "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg==".to_string(),
-            resolved_hash: ContentHash::blake3("lodash-4.17.21".to_string()),
+            resolved_hash: Some(ContentHash::blake3("lodash-4.17.21".to_string())),
             direct: true,
             features: vec![],
             dependencies: vec![],
@@ -330,7 +330,7 @@ pub mod lockfiles {
             ecosystem: Ecosystem::Npm,
             source: "https://registry.npmjs.org/express/-/express-4.18.2.tgz".to_string(),
             integrity: "sha512-5/PsL6iGPdfQ/lKM1UuielYgv3BUoJfz1aUwU9vHZ+J7gyvwdQXFEBIEIaxeGf0GIcreATNyBExtalisDbuMqQ==".to_string(),
-            resolved_hash: ContentHash::blake3("express-4.18.2".to_string()),
+            resolved_hash: Some(ContentHash::blake3("express-4.18.2".to_string())),
             direct: true,
             features: vec![],
             dependencies: vec![
@@ -354,7 +354,7 @@ pub mod lockfiles {
             ecosystem: Ecosystem::PyPi,
             source: "https://files.pythonhosted.org/packages/70/8e/0e2d847013cb52cd35b38c009bb167a1a26b2ce6cd6965bf26b47bc0bf44/requests-2.31.0-py3-none-any.whl".to_string(),
             integrity: "sha256-58cd2187c01e70e6e26505bca751777aa9f2ee0b7f4300988b709f44e013003f".to_string(),
-            resolved_hash: ContentHash::blake3("requests-2.31.0".to_string()),
+            resolved_hash: Some(ContentHash::blake3("requests-2.31.0".to_string())),
             direct: true,
             features: vec![],
             dependencies: vec![
@@ -380,7 +380,7 @@ pub mod lockfiles {
             source: "https://crates.io/api/v1/crates/serde/1.0.195/download".to_string(),
             integrity: "sha256-bf1de9e01c5a7c9e0e5a5d4a5e8e5c1f2f3f4f5f6f7f8f9f0f1f2f3f4f5f6f7"
                 .to_string(),
-            resolved_hash: ContentHash::blake3("serde-1.0.195".to_string()),
+            resolved_hash: Some(ContentHash::blake3("serde-1.0.195".to_string())),
             direct: true,
             features: vec!["derive".to_string(), "std".to_string()],
             dependencies: vec![DependencyRef::new("serde_derive", "1.0.195")],
@@ -401,7 +401,7 @@ pub mod lockfiles {
             ecosystem: Ecosystem::Npm,
             source: "https://registry.npmjs.org/express/-/express-4.18.2.tgz".to_string(),
             integrity: "sha512-5/PsL6iGPdfQ/lKM1UuielYgv3BUoJfz1aUwU9vHZ+J7gyvwdQXFEBIEIaxeGf0GIcreATNyBExtalisDbuMqQ==".to_string(),
-            resolved_hash: ContentHash::blake3("express-4.18.2".to_string()),
+            resolved_hash: Some(ContentHash::blake3("express-4.18.2".to_string())),
             direct: true,
             features: vec![],
             dependencies: vec![
@@ -419,7 +419,7 @@ pub mod lockfiles {
             ecosystem: Ecosystem::Npm,
             source: "https://registry.npmjs.org/accepts/-/accepts-1.3.8.tgz".to_string(),
             integrity: "sha512-PYAthTa2m2VKxuvSD3DPC/Gy+U+sOA1LAuT8mkmRuvw+NACSaeXEQ+NHcVF7rONl6qcaxV3Uuemwawk+7+SJLw==".to_string(),
-            resolved_hash: ContentHash::blake3("accepts-1.3.8".to_string()),
+            resolved_hash: Some(ContentHash::blake3("accepts-1.3.8".to_string())),
             direct: false,
             features: vec![],
             dependencies: vec![
@@ -434,7 +434,7 @@ pub mod lockfiles {
             ecosystem: Ecosystem::Npm,
             source: "https://registry.npmjs.org/body-parser/-/body-parser-1.20.1.tgz".to_string(),
             integrity: "sha512-jWi7abTbYwajOytWCQc37VulmWiRae5RyTpaCyDcS5/lMdtwSz5lOpDE67srw/HYe35f1z3fDQw+3txg7gNtWw==".to_string(),
-            resolved_hash: ContentHash::blake3("body-parser-1.20.1".to_string()),
+            resolved_hash: Some(ContentHash::blake3("body-parser-1.20.1".to_string())),
             direct: false,
             features: vec![],
             dependencies: vec![
@@ -459,7 +459,7 @@ pub mod lockfiles {
             ecosystem: Ecosystem::Npm,
             source: "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz".to_string(),
             integrity: "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg==".to_string(),
-            resolved_hash: ContentHash::blake3("lodash-4.17.21".to_string()),
+            resolved_hash: Some(ContentHash::blake3("lodash-4.17.21".to_string())),
             direct: true,
             features: vec![],
             dependencies: vec![],
@@ -474,7 +474,7 @@ pub mod lockfiles {
                 .to_string(),
             integrity: "sha256-58cd2187c01e70e6e26505bca751777aa9f2ee0b7f4300988b709f44e013003f"
                 .to_string(),
-            resolved_hash: ContentHash::blake3("requests-2.31.0".to_string()),
+            resolved_hash: Some(ContentHash::blake3("requests-2.31.0".to_string())),
             direct: true,
             features: vec![],
             dependencies: vec![],
@@ -488,7 +488,7 @@ pub mod lockfiles {
             source: "https://crates.io/api/v1/crates/serde/1.0.195/download".to_string(),
             integrity: "sha256-bf1de9e01c5a7c9e0e5a5d4a5e8e5c1f2f3f4f5f6f7f8f9f0f1f2f3f4f5f6f7"
                 .to_string(),
-            resolved_hash: ContentHash::blake3("serde-1.0.195".to_string()),
+            resolved_hash: Some(ContentHash::blake3("serde-1.0.195".to_string())),
             direct: true,
             features: vec!["derive".to_string()],
             dependencies: vec![],

@@ -66,128 +66,39 @@ pub async fn resolve_and_lock(
 /// - Resolution strategy settings
 #[must_use]
 pub fn compute_manifest_hash(manifest: &Manifest) -> ContentHash {
-    // Hash a canonical representation of all dependencies and configuration
-    let mut hash_input = String::new();
+    let mut hash_input = serde_json::to_value(manifest)
+        .expect("manifest serialization for freshness hashing should not fail");
+    sort_json_objects(&mut hash_input);
+    let hash_input = serde_json::to_vec(&hash_input)
+        .expect("manifest canonical serialization for freshness hashing should not fail");
+    Hasher::hash_bytes(HashAlgorithm::Blake3, &hash_input)
+}
 
-    // Regular dependencies
-    hash_input.push_str("dependencies:\n");
-    for ecosystem in Ecosystem::all() {
-        let deps = manifest.dependencies.for_ecosystem(*ecosystem);
-        let mut sorted_deps: Vec<_> = deps.iter().collect();
-        sorted_deps.sort_by_key(|(name, _)| *name);
-        for (name, dep) in sorted_deps {
-            hash_input.push_str(&format!(
-                "{}:{}:{}\n",
-                ecosystem,
-                name,
-                dep.version().unwrap_or("*")
-            ));
+fn sort_json_objects(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for value in map.values_mut() {
+                sort_json_objects(value);
+            }
+
+            let mut entries = map
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+            map.clear();
+            for (key, value) in entries {
+                map.insert(key, value);
+            }
         }
-    }
-
-    // Environment
-    hash_input.push_str("environment:\n");
-    if let Some(v) = &manifest.environment.node {
-        hash_input.push_str(&format!("node:{}\n", v));
-    }
-    if let Some(v) = &manifest.environment.python {
-        hash_input.push_str(&format!("python:{}\n", v));
-    }
-    if let Some(v) = &manifest.environment.rust {
-        hash_input.push_str(&format!("rust:{}\n", v));
-    }
-    if let Some(v) = &manifest.environment.go {
-        hash_input.push_str(&format!("go:{}\n", v));
-    }
-    if let Some(v) = &manifest.environment.java {
-        hash_input.push_str(&format!("java:{}\n", v));
-    }
-
-    hash_input.push_str("system:\n");
-    for sys in &manifest.environment.system {
-        hash_input.push_str(&format!("{}\n", sys));
-    }
-
-    hash_input.push_str("env-vars:\n");
-    let mut sorted_vars: Vec<_> = manifest.environment.vars.iter().collect();
-    sorted_vars.sort_by_key(|(k, _)| *k);
-    for (k, v) in sorted_vars {
-        hash_input.push_str(&format!("{}:{}\n", k, v));
-    }
-
-    // Build Dependencies
-    hash_input.push_str("build-dependencies:\n");
-    for ecosystem in Ecosystem::all() {
-        let deps = manifest.build.dependencies.for_ecosystem(*ecosystem);
-        let mut sorted_deps: Vec<_> = deps.iter().collect();
-        sorted_deps.sort_by_key(|(name, _)| *name);
-        for (name, dep) in sorted_deps {
-            hash_input.push_str(&format!(
-                "{}:{}:{}\n",
-                ecosystem,
-                name,
-                dep.version().unwrap_or("*")
-            ));
+        serde_json::Value::Array(values) => {
+            for value in values {
+                sort_json_objects(value);
+            }
         }
+        _ => {}
     }
-
-    // Dev dependencies
-    hash_input.push_str("dev-dependencies:\n");
-    for ecosystem in Ecosystem::all() {
-        let deps = manifest.dev_dependencies.for_ecosystem(*ecosystem);
-        let mut sorted_deps: Vec<_> = deps.iter().collect();
-        sorted_deps.sort_by_key(|(name, _)| *name);
-        for (name, dep) in sorted_deps {
-            hash_input.push_str(&format!(
-                "{}:{}:{}\n",
-                ecosystem,
-                name,
-                dep.version().unwrap_or("*")
-            ));
-        }
-    }
-
-    // Optional dependencies
-    hash_input.push_str("optional-dependencies:\n");
-    for ecosystem in Ecosystem::all() {
-        let deps = manifest.optional_dependencies.for_ecosystem(*ecosystem);
-        let mut sorted_deps: Vec<_> = deps.iter().collect();
-        sorted_deps.sort_by_key(|(name, _)| *name);
-        for (name, dep) in sorted_deps {
-            hash_input.push_str(&format!(
-                "{}:{}:{}\n",
-                ecosystem,
-                name,
-                dep.version().unwrap_or("*")
-            ));
-        }
-    }
-
-    // Overrides
-    hash_input.push_str("overrides:\n");
-    for ecosystem in Ecosystem::all() {
-        let deps = manifest.overrides.for_ecosystem(*ecosystem);
-        let mut sorted_deps: Vec<_> = deps.iter().collect();
-        sorted_deps.sort_by_key(|(name, _)| *name);
-        for (name, dep) in sorted_deps {
-            hash_input.push_str(&format!(
-                "{}:{}:{}\n",
-                ecosystem,
-                name,
-                dep.version().unwrap_or("*")
-            ));
-        }
-    }
-
-    // Resolution strategy
-    hash_input.push_str("resolution:\n");
-    let mut sorted_resolution: Vec<_> = manifest.resolution.iter().collect();
-    sorted_resolution.sort_by_key(|(eco, _)| eco.to_string());
-    for (ecosystem, strategy) in sorted_resolution {
-        hash_input.push_str(&format!("{}:{:?}\n", ecosystem, strategy));
-    }
-
-    Hasher::hash_bytes(HashAlgorithm::Blake3, hash_input.as_bytes())
 }
 
 /// The result of dependency resolution.
@@ -267,12 +178,121 @@ pub struct ResolvedPackage {
     pub source: String,
     /// Integrity hash
     pub integrity: String,
-    /// Resolved content hash
-    pub resolved_hash: cratons_core::ContentHash,
+    /// Resolved archive content hash, if the archive has been downloaded into CAS.
+    pub resolved_hash: Option<cratons_core::ContentHash>,
     /// Whether this is a direct dependency
     pub direct: bool,
     /// Enabled features
     pub features: Vec<String>,
     /// Dependencies (name, version)
     pub dependencies: Vec<(String, String)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cratons_manifest::dependency::DetailedDependency;
+    use cratons_manifest::{Dependency, Manifest};
+
+    fn url_dep(url: &str, sha256: &str) -> Dependency {
+        Dependency::Detailed(DetailedDependency {
+            url: Some(url.to_string()),
+            sha256: Some(sha256.to_string()),
+            ..DetailedDependency::default()
+        })
+    }
+
+    #[test]
+    fn manifest_hash_changes_when_url_checksum_changes() {
+        let mut manifest_a = Manifest::default();
+        manifest_a.dependencies.url.insert(
+            "asset".to_string(),
+            url_dep(
+                "https://example.com/pkg.tgz",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+        );
+
+        let mut manifest_b = manifest_a.clone();
+        manifest_b.dependencies.url.insert(
+            "asset".to_string(),
+            url_dep(
+                "https://example.com/pkg.tgz",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+        );
+
+        assert_ne!(
+            compute_manifest_hash(&manifest_a),
+            compute_manifest_hash(&manifest_b)
+        );
+    }
+
+    #[test]
+    fn manifest_hash_is_independent_of_map_insertion_order() {
+        let mut manifest_a = Manifest::default();
+        manifest_a.dependencies.npm.insert(
+            "left-pad".to_string(),
+            Dependency::Version("^1.3.0".to_string()),
+        );
+        manifest_a.dependencies.npm.insert(
+            "lodash".to_string(),
+            Dependency::Version("^4.17.21".to_string()),
+        );
+        manifest_a
+            .environment
+            .vars
+            .insert("NODE_ENV".to_string(), "production".to_string());
+        manifest_a
+            .environment
+            .vars
+            .insert("TZ".to_string(), "UTC".to_string());
+
+        let mut manifest_b = Manifest::default();
+        manifest_b
+            .environment
+            .vars
+            .insert("TZ".to_string(), "UTC".to_string());
+        manifest_b
+            .environment
+            .vars
+            .insert("NODE_ENV".to_string(), "production".to_string());
+        manifest_b.dependencies.npm.insert(
+            "lodash".to_string(),
+            Dependency::Version("^4.17.21".to_string()),
+        );
+        manifest_b.dependencies.npm.insert(
+            "left-pad".to_string(),
+            Dependency::Version("^1.3.0".to_string()),
+        );
+
+        assert_eq!(
+            compute_manifest_hash(&manifest_a),
+            compute_manifest_hash(&manifest_b)
+        );
+    }
+
+    #[tokio::test]
+    async fn url_dependencies_resolve_without_registry_and_without_fake_hash() {
+        let mut manifest = Manifest::default();
+        manifest.dependencies.url.insert(
+            "asset".to_string(),
+            url_dep(
+                "https://example.com/pkg.tgz",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+        );
+
+        let resolver = Resolver::with_defaults(false).unwrap();
+        let resolution = resolver.resolve(&manifest).await.unwrap();
+        let pkg = resolution
+            .packages
+            .iter()
+            .find(|pkg| pkg.ecosystem == Ecosystem::Url && pkg.name == "asset")
+            .expect("url package should resolve");
+
+        assert_eq!(pkg.source, "https://example.com/pkg.tgz");
+        assert!(pkg.integrity.starts_with("sha256-"));
+        assert!(pkg.resolved_hash.is_none());
+    }
 }

@@ -263,7 +263,7 @@ pub fn locked_package_strategy() -> impl Strategy<Value = LockedPackage> {
                         ecosystem,
                         source,
                         integrity,
-                        resolved_hash: hash.clone(),
+                        resolved_hash: Some(hash.clone()),
                         direct,
                         features: features.clone(),
                         dependencies,

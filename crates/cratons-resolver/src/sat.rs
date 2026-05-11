@@ -343,13 +343,22 @@ fn parse_range(ecosystem: Ecosystem, req: &str) -> Ranges<SatVersion> {
     }
 
     match ecosystem {
-        Ecosystem::Npm | Ecosystem::Crates => semver::VersionReq::parse(req).map_or_else(
-            |_| Ranges::full(),
+        Ecosystem::Npm => {
+            if node_semver::Range::parse(req).is_err() {
+                return Ranges::empty();
+            }
+            semver::VersionReq::parse(req).map_or_else(
+                |_| Ranges::empty(),
+                |semver_req| semver_to_range(&semver_req),
+            )
+        }
+        Ecosystem::Crates => semver::VersionReq::parse(req).map_or_else(
+            |_| Ranges::empty(),
             |semver_req| semver_to_range(&semver_req),
         ),
         Ecosystem::PyPi => req
             .parse::<pep440_rs::VersionSpecifiers>()
-            .map_or_else(|_| Ranges::full(), |pep_req| pep440_to_range(&pep_req)),
+            .map_or_else(|_| Ranges::empty(), |pep_req| pep440_to_range(&pep_req)),
         _ => Ranges::full(),
     }
 }
@@ -630,8 +639,8 @@ mod tests {
         assert!(range.contains(&SatVersion::SemVer(semver::Version::new(0, 0, 1))));
         assert!(range.contains(&SatVersion::SemVer(semver::Version::new(99, 0, 0))));
 
-        // Invalid version requirement falls back to any
+        // Invalid version requirements fail closed.
         let range = parse_range(Ecosystem::Npm, "not-a-version");
-        assert!(range.contains(&SatVersion::SemVer(semver::Version::new(1, 0, 0))));
+        assert!(!range.contains(&SatVersion::SemVer(semver::Version::new(1, 0, 0))));
     }
 }

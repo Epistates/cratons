@@ -11,7 +11,11 @@ use crate::Error;
 use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::RwLock;
+use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 use zeroize::Zeroize;
 
@@ -299,9 +303,19 @@ impl CredentialStore for MemoryStore {
 /// - 22 bytes: Base64-encoded salt (for Argon2 key derivation)
 /// - Rest: Base64-encoded encrypted data (12-byte nonce + ciphertext + 16-byte auth tag)
 pub struct FileStore {
-    path: std::path::PathBuf,
+    path: PathBuf,
     /// Password stored as SecretString for automatic zeroization on drop
     password: SecretString,
+}
+
+struct FileStoreLock {
+    path: PathBuf,
+}
+
+impl Drop for FileStoreLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 impl FileStore {
@@ -309,11 +323,50 @@ impl FileStore {
     const SALT_LEN: usize = 22;
 
     /// Create a new file store with password-based encryption.
-    pub fn new(path: std::path::PathBuf, password: &str) -> Result<Self, Error> {
+    pub fn new(path: PathBuf, password: &str) -> Result<Self, Error> {
         Ok(Self {
             path,
             password: SecretString::from(password.to_string()),
         })
+    }
+
+    fn lock_path(&self) -> PathBuf {
+        self.path.with_extension("lock")
+    }
+
+    fn acquire_lock(&self) -> Result<FileStoreLock, Error> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let lock_path = self.lock_path();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(mut file) => {
+                    writeln!(file, "{}", std::process::id())?;
+                    file.sync_all()?;
+                    return Ok(FileStoreLock { path: lock_path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if Instant::now() >= deadline {
+                        return Err(Error::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!(
+                                "Timed out waiting for credential lock {}",
+                                lock_path.display()
+                            ),
+                        )));
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(e) => return Err(Error::Io(e)),
+            }
+        }
     }
 
     /// Derive encryption key from password and salt.
@@ -487,10 +540,42 @@ impl FileStore {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Write salt + encrypted data
-        std::fs::write(&self.path, format!("{salt}{encoded}"))?;
+        let temp_path = self.path.with_extension(format!(
+            "tmp.{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
 
-        // SECURITY: Set restrictive file permissions (owner read/write only)
+        // Write salt + encrypted data to a new 0600 temp file and rename it
+        // into place. This avoids a window where a newly created credential
+        // file inherits permissive process umask permissions.
+        let write_result = (|| -> Result<(), Error> {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+
+            let mut file = options.open(&temp_path)?;
+            file.write_all(format!("{salt}{encoded}").as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temp_path, &self.path)?;
+            Ok(())
+        })();
+
+        if write_result.is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+        write_result?;
+
+        // SECURITY: Ensure restrictive file permissions after replacement too.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -511,12 +596,14 @@ impl CredentialStore for FileStore {
 
     async fn set(&self, key: &str, value: SecretString) -> Result<(), Error> {
         use secrecy::ExposeSecret;
+        let _lock = self.acquire_lock()?;
         let mut store = self.load_store()?;
         store.insert(key.to_string(), value.expose_secret().to_string());
         self.save_store(&store)
     }
 
     async fn delete(&self, key: &str) -> Result<(), Error> {
+        let _lock = self.acquire_lock()?;
         let mut store = self.load_store()?;
         store.remove(key);
         self.save_store(&store)

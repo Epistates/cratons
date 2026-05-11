@@ -170,7 +170,7 @@ pub fn generate_lockfile(package_count: usize) -> cratons_lockfile::Lockfile {
             ecosystem,
             source: format!("https://registry.example.com/{}/{}", name, version),
             integrity: format!("sha256-{:064x}", i),
-            resolved_hash: ContentHash::blake3(format!("{}-{}", name, version)),
+            resolved_hash: Some(ContentHash::blake3(format!("{}-{}", name, version))),
             direct: i < 20, // First 20 are direct dependencies
             features: if i % 3 == 0 {
                 vec![format!("feature-{}", i % 5)]

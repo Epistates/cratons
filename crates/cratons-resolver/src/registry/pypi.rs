@@ -12,7 +12,10 @@
 //! to prevent SSRF attacks. See [`cratons_core::validation`] for details.
 
 use async_trait::async_trait;
-use cratons_core::{CratonsError, Ecosystem, Result, validate_package_name, validate_version};
+use cratons_core::{
+    CratonsError, Ecosystem, Result, hash_normalization::normalize_checksum_format,
+    validate_package_name, validate_version,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -431,13 +434,11 @@ impl RegistryClient for PyPiClient {
             );
         }
 
-        // Prefer SHA256, fall back to blake2b or md5
+        // Prefer SHA256 and normalize PyPI's hex digest into the base64 SRI
+        // form used by the installer. Do not fall back to blake2b/md5 here:
+        // the installer intentionally rejects unsupported or weak algorithms.
         let integrity = if !best_url.digests.sha256.is_empty() {
-            format!("sha256-{}", best_url.digests.sha256)
-        } else if !best_url.digests.blake2b.is_empty() {
-            format!("blake2b-{}", best_url.digests.blake2b)
-        } else if !best_url.digests.md5.is_empty() {
-            format!("md5-{}", best_url.digests.md5)
+            normalize_checksum_format(&format!("sha256-{}", best_url.digests.sha256))?
         } else {
             String::new()
         };

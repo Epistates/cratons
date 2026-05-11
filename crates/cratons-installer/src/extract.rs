@@ -45,6 +45,15 @@ struct ExtractContext {
     canonical_dest: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UrlArchiveFormat {
+    GzipTar,
+    Zip,
+    Tar,
+    XzTar,
+    Unknown,
+}
+
 impl ExtractContext {
     /// Build a new context by canonicalizing `dest`. `dest` must already exist.
     #[allow(dead_code)] // wired into callers in Phase 2
@@ -1252,28 +1261,58 @@ impl PackageExtractor {
 
     /// Extract a URL-sourced package.
     ///
-    /// Attempts to auto-detect the format based on file extension.
+    /// Attempts to auto-detect the format by extension first, then magic
+    /// bytes. URL packages are stored in CAS under extensionless hash names,
+    /// so extension-only detection would copy most archives without extracting.
     fn extract_url_package(&self, archive_path: &Path, ctx: &ExtractContext) -> Result<()> {
+        match Self::detect_url_archive_format(archive_path)? {
+            UrlArchiveFormat::GzipTar => self.extract_tarball(archive_path, ctx),
+            UrlArchiveFormat::Zip => self.extract_zip(archive_path, ctx),
+            UrlArchiveFormat::Tar => self.extract_plain_tar(archive_path, ctx),
+            UrlArchiveFormat::XzTar => self.extract_xz_tarball(archive_path, ctx),
+            UrlArchiveFormat::Unknown => {
+                let filename = archive_path
+                    .file_name()
+                    .ok_or_else(|| CratonsError::Config("Invalid archive path".to_string()))?;
+                let dest_path = Self::validate_path_ctx(ctx, Path::new(filename))?;
+                fs::copy(archive_path, &dest_path)?;
+                debug!("Copied URL package to {}", ctx.canonical_dest.display());
+                Ok(())
+            }
+        }
+    }
+
+    fn detect_url_archive_format(archive_path: &Path) -> Result<UrlArchiveFormat> {
         let path_str = archive_path.to_string_lossy().to_lowercase();
 
         if path_str.ends_with(".tar.gz") || path_str.ends_with(".tgz") {
-            self.extract_tarball(archive_path, ctx)
+            return Ok(UrlArchiveFormat::GzipTar);
         } else if path_str.ends_with(".zip") {
-            self.extract_zip(archive_path, ctx)
+            return Ok(UrlArchiveFormat::Zip);
         } else if path_str.ends_with(".tar") {
-            self.extract_plain_tar(archive_path, ctx)
+            return Ok(UrlArchiveFormat::Tar);
         } else if path_str.ends_with(".tar.xz") || path_str.ends_with(".txz") {
-            // XZ compressed tarball - use same security checks
-            self.extract_xz_tarball(archive_path, ctx)
+            return Ok(UrlArchiveFormat::XzTar);
+        }
+
+        let mut file = File::open(archive_path)?;
+        let mut header = [0_u8; 265];
+        let bytes_read = file.read(&mut header)?;
+
+        if bytes_read >= 6 && header[..6] == [0xfd, b'7', b'z', b'X', b'Z', 0x00] {
+            Ok(UrlArchiveFormat::XzTar)
+        } else if bytes_read >= 4
+            && (&header[..4] == b"PK\x03\x04"
+                || &header[..4] == b"PK\x05\x06"
+                || &header[..4] == b"PK\x07\x08")
+        {
+            Ok(UrlArchiveFormat::Zip)
+        } else if bytes_read >= 2 && header[..2] == [0x1f, 0x8b] {
+            Ok(UrlArchiveFormat::GzipTar)
+        } else if bytes_read >= 262 && &header[257..262] == b"ustar" {
+            Ok(UrlArchiveFormat::Tar)
         } else {
-            // Unknown format - just copy the file (validated destination)
-            let filename = archive_path
-                .file_name()
-                .ok_or_else(|| CratonsError::Config("Invalid archive path".to_string()))?;
-            let dest_path = Self::validate_path_ctx(ctx, Path::new(filename))?;
-            fs::copy(archive_path, &dest_path)?;
-            debug!("Copied URL package to {}", ctx.canonical_dest.display());
-            Ok(())
+            Ok(UrlArchiveFormat::Unknown)
         }
     }
 
@@ -1612,5 +1651,34 @@ mod tests {
         let ctx = ExtractContext::new(dest.path()).unwrap();
         let result = PackageExtractor::validate_path_ctx(&ctx, Path::new("escape/new-file.txt"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_url_package_detects_extensionless_targz_by_magic_bytes() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+
+        let archive_dir = TempDir::new().unwrap();
+        let archive_path = archive_dir.path().join("b3ab7e-cas-object");
+        let archive_file = File::create(&archive_path).unwrap();
+        let encoder = GzEncoder::new(archive_file, Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        let contents = b"hello from url package";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("nested/file.txt").unwrap();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive.append(&header, &contents[..]).unwrap();
+        archive.into_inner().unwrap().finish().unwrap();
+
+        let dest = TempDir::new().unwrap();
+        let ctx = ExtractContext::new(dest.path()).unwrap();
+        PackageExtractor::new()
+            .extract_url_package(&archive_path, &ctx)
+            .unwrap();
+
+        let extracted = std::fs::read_to_string(dest.path().join("nested/file.txt")).unwrap();
+        assert_eq!(extracted, "hello from url package");
     }
 }

@@ -126,10 +126,10 @@ impl ContentHash {
     /// at the parse boundary.
     pub fn parse(s: &str) -> Result<Self> {
         let (algorithm, value) = if let Some((algo, value)) = s.split_once(':') {
-            (algo.parse::<HashAlgorithm>()?, value.to_string())
+            (algo.parse::<HashAlgorithm>()?, value.to_ascii_lowercase())
         } else {
             // Default to Blake3 for bare hashes
-            (HashAlgorithm::Blake3, s.to_string())
+            (HashAlgorithm::Blake3, s.to_ascii_lowercase())
         };
         validate_hex_value(algorithm, &value)?;
         Ok(Self { algorithm, value })

@@ -17,7 +17,7 @@ mod extract;
 mod link;
 mod scripts;
 
-use cratons_core::{CratonsError, Ecosystem, Result};
+use cratons_core::{ContentHash, CratonsError, Ecosystem, Result};
 use cratons_environment::Environment;
 use cratons_lockfile::{LockedPackage, Lockfile};
 use cratons_store::Store;
@@ -95,8 +95,8 @@ pub enum SandboxPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntegrityPolicy {
     /// Fail any install where a downloaded package has empty registry
-    /// integrity. This is the strongest policy and will become the
-    /// default once Go and Maven have independent integrity anchors.
+    /// integrity, except ecosystems with mandatory independent verification
+    /// (currently Maven PGP).
     Required,
     /// Require integrity for all ecosystems except the ones listed here.
     /// Ecosystems in the allowlist emit a structured `integrity-degraded`
@@ -110,8 +110,8 @@ pub enum IntegrityPolicy {
 }
 
 impl Default for IntegrityPolicy {
-    /// **Default is `Required`** — fail closed for any ecosystem where the
-    /// registry returns empty integrity.
+    /// **Default is `Required`** — fail closed for empty registry integrity
+    /// unless an ecosystem has a mandatory independent verifier.
     ///
     /// Prior to F-final (F-1 Go sum.golang.org + F-2 Maven PGP), this
     /// default was `RequiredWithEcosystemAllowlist([Go, Maven])` because
@@ -333,6 +333,9 @@ pub struct InstallResult {
     /// lockfile in place — keeping the read/write split clean makes
     /// failed installs not corrupt on-disk state.
     pub pgp_trust_updates: HashMap<String, String>,
+    /// Real CAS hashes observed during this install, keyed by
+    /// `(ecosystem, package name, version)`.
+    pub content_hash_updates: HashMap<(Ecosystem, String, String), ContentHash>,
 }
 
 /// Per-ecosystem installation result.
@@ -357,6 +360,8 @@ pub struct EcosystemResult {
     /// populated for Maven. Aggregated into
     /// [`InstallResult::pgp_trust_updates`] by the top-level loop.
     pub pgp_trust_updates: HashMap<String, String>,
+    /// Real CAS hashes observed while installing this ecosystem.
+    pub content_hash_updates: HashMap<(Ecosystem, String, String), ContentHash>,
 }
 
 /// Status of a single package installation.
@@ -374,6 +379,8 @@ pub struct PackageInstallStatus {
     pub bytes_downloaded: u64,
     /// Installation path
     pub install_path: PathBuf,
+    /// Real CAS hash of the archive used for this install.
+    pub content_hash: ContentHash,
 }
 
 /// The main installer orchestrator.
@@ -439,6 +446,7 @@ impl<'a> Installer<'a> {
             environment_setup: false,
             activation_script: None,
             pgp_trust_updates: HashMap::new(),
+            content_hash_updates: HashMap::new(),
         };
 
         // Topologically sort packages by dependencies to ensure correct installation order
@@ -447,10 +455,6 @@ impl<'a> Installer<'a> {
         // Group packages by ecosystem (preserving topological order within each group)
         let mut by_ecosystem: HashMap<Ecosystem, Vec<&LockedPackage>> = HashMap::new();
         for pkg in &sorted_packages {
-            // Skip URL ecosystem (direct URLs, not from registries)
-            if pkg.ecosystem == Ecosystem::Url {
-                continue;
-            }
             // Filter by ecosystem if configured
             if let Some(ref ecosystems) = self.config.ecosystems {
                 if !ecosystems.contains(&pkg.ecosystem) {
@@ -483,6 +487,13 @@ impl<'a> Installer<'a> {
                     .pgp_trust_updates
                     .insert(group_id.clone(), fingerprint.clone());
             }
+
+            result.content_hash_updates.extend(
+                eco_result
+                    .content_hash_updates
+                    .iter()
+                    .map(|(key, hash)| (key.clone(), hash.clone())),
+            );
 
             result.ecosystems.insert(ecosystem, eco_result);
         }
@@ -622,6 +633,10 @@ impl<'a> Installer<'a> {
         let linker = PackageLinker::new(self.store, self.config.link_strategy);
         for status in &statuses {
             linker.link_package(&status.install_path, &install_dir, ecosystem, &status.name)?;
+            eco_result.content_hash_updates.insert(
+                (ecosystem, status.name.clone(), status.version.clone()),
+                status.content_hash.clone(),
+            );
 
             eco_result.packages += 1;
             if status.cached {
@@ -655,22 +670,36 @@ impl<'a> Installer<'a> {
         let mut to_download: Vec<&LockedPackage> = Vec::new();
 
         for pkg in packages {
-            let content_hash = &pkg.resolved_hash;
-
             // Check if already in CAS
-            if let Some(cached_path) = self.store.cas().get(content_hash) {
-                debug!("Cache hit: {}@{}", pkg.name, pkg.version);
-                statuses.push(PackageInstallStatus {
-                    name: pkg.name.clone(),
-                    version: pkg.version.clone(),
-                    ecosystem: pkg.ecosystem,
-                    cached: true,
-                    bytes_downloaded: 0,
-                    install_path: cached_path,
-                });
-            } else {
-                to_download.push(pkg);
+            if let Some(content_hash) = &pkg.resolved_hash {
+                if let Some(cached_path) = self.store.cas().get(content_hash) {
+                    debug!("Cache hit: {}@{}", pkg.name, pkg.version);
+                    let cached_bytes = self
+                        .store
+                        .cas()
+                        .read_with_verify(content_hash, true)?
+                        .ok_or_else(|| CratonsError::PackageNotFound(pkg.name.clone()))?;
+                    if !pkg.integrity.is_empty() {
+                        downloader.verify_download_integrity(pkg, &cached_bytes)?;
+                    }
+                    let extracted_path =
+                        self.extractor
+                            .extract(&cached_path, pkg.ecosystem, self.store)?;
+
+                    statuses.push(PackageInstallStatus {
+                        name: pkg.name.clone(),
+                        version: pkg.version.clone(),
+                        ecosystem: pkg.ecosystem,
+                        cached: true,
+                        bytes_downloaded: 0,
+                        install_path: extracted_path,
+                        content_hash: content_hash.clone(),
+                    });
+                    continue;
+                }
             }
+
+            to_download.push(pkg);
         }
 
         // Download missing packages in parallel. Use the per-install
@@ -686,22 +715,6 @@ impl<'a> Installer<'a> {
                     .extractor
                     .extract(&dl.path, pkg.ecosystem, self.store)?;
 
-                // Verify content-hash integrity after extraction. Empty
-                // integrity is already policy-gated earlier in
-                // `install_ecosystem`, so reaching this point with an empty
-                // value means the active policy allows it (Skip or
-                // allowlisted ecosystem). Only non-empty values trigger the
-                // post-extract hash check.
-                if !pkg.integrity.is_empty() {
-                    self.verify_integrity(pkg, &extracted_path)?;
-                }
-
-                // Collect any TOFU pin emitted by the downloader for this
-                // package (F-2c).
-                if let Some((group_id, fingerprint)) = dl.tofu_pin {
-                    pgp_pins.insert(group_id, fingerprint);
-                }
-
                 statuses.push(PackageInstallStatus {
                     name: pkg.name.clone(),
                     version: pkg.version.clone(),
@@ -709,7 +722,14 @@ impl<'a> Installer<'a> {
                     cached: false,
                     bytes_downloaded: dl.bytes_downloaded,
                     install_path: extracted_path,
+                    content_hash: dl.content_hash,
                 });
+
+                // Collect any TOFU pin emitted by the downloader for this
+                // package (F-2c).
+                if let Some((group_id, fingerprint)) = dl.tofu_pin {
+                    pgp_pins.insert(group_id, fingerprint);
+                }
             }
         }
 
@@ -824,6 +844,14 @@ impl<'a> Installer<'a> {
                 continue;
             }
 
+            if ecosystem == Ecosystem::Maven {
+                // Maven artifacts are verified with mandatory detached PGP
+                // signatures in the downloader. Maven Central does not expose
+                // a registry-origin SRI value, so empty registry integrity is
+                // acceptable only for this PGP-backed ecosystem.
+                continue;
+            }
+
             if self
                 .config
                 .integrity_policy
@@ -851,33 +879,6 @@ impl<'a> Installer<'a> {
                 });
             }
         }
-        Ok(())
-    }
-
-    /// Note: Primary integrity verification (tarball hash) happens in download.rs
-    /// before extraction. This function provides secondary verification for cached
-    /// packages using our content-addressed store hash.
-    fn verify_integrity(&self, pkg: &LockedPackage, path: &Path) -> Result<()> {
-        use cratons_core::{HashAlgorithm, Hasher};
-
-        // For CAS-stored packages, verify against our Blake3 hash
-        if !pkg.resolved_hash.value.is_empty() {
-            let actual = Hasher::hash_directory(HashAlgorithm::Blake3, path)?;
-
-            if actual.value != pkg.resolved_hash.value {
-                return Err(CratonsError::ChecksumMismatch {
-                    package: pkg.name.clone(),
-                    expected: pkg.resolved_hash.value.clone(),
-                    actual: actual.value,
-                });
-            }
-
-            debug!(
-                "Content hash verified for {}@{}: {}",
-                pkg.name, pkg.version, actual.value
-            );
-        }
-
         Ok(())
     }
 
@@ -1037,6 +1038,7 @@ mod tests {
             environment_setup: true,
             activation_script: Some(PathBuf::from("/project/.cratons/activate")),
             pgp_trust_updates: HashMap::new(),
+            content_hash_updates: HashMap::new(),
         };
 
         assert_eq!(result.packages_installed, 10);
@@ -1065,6 +1067,9 @@ mod tests {
             cached: true,
             bytes_downloaded: 0,
             install_path: PathBuf::from("/tmp/lodash"),
+            content_hash: ContentHash::blake3(
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ),
         };
 
         assert_eq!(status.name, "lodash");

@@ -150,6 +150,33 @@ impl DependencyGraph {
         self.graph.add_edge(from_idx, to_idx, edge);
     }
 
+    /// Return true if an identical dependency edge already exists.
+    #[must_use]
+    pub fn has_dependency_edge(
+        &self,
+        from: &str,
+        from_eco: Ecosystem,
+        to: &str,
+        to_eco: Ecosystem,
+        version_req: &VersionReq,
+        kind: DependencyKind,
+    ) -> bool {
+        let Some(&from_idx) = self.index_map.get(&(from_eco, from.to_string())) else {
+            return false;
+        };
+        let Some(&to_idx) = self.index_map.get(&(to_eco, to.to_string())) else {
+            return false;
+        };
+
+        self.graph
+            .edges_directed(from_idx, Direction::Outgoing)
+            .any(|edge| {
+                edge.target() == to_idx
+                    && edge.weight().kind == kind
+                    && edge.weight().version_req.to_string() == version_req.to_string()
+            })
+    }
+
     /// Add a dependency edge with full options.
     #[allow(clippy::too_many_arguments)]
     pub fn add_dependency_with_options(
