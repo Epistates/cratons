@@ -18,7 +18,7 @@ reqwest = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 # Policy engine
-cedar-policy = "4.10"
+cedar-policy = "4.11"
 # OSV cache (M-13)
 humantime-serde = "1.1"
 dirs = "6.0"
