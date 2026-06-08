@@ -98,7 +98,7 @@ sigstore = { version = "0.13", default-features = false, features = ["verify", "
 keyring-core = "1.0"
 apple-native-keyring-store = { version = "1.0", default-features = false, features = ["keychain"] }
 linux-keyutils-keyring-store = "1.0"
-windows-native-keyring-store = "1.0"
+windows-native-keyring-store = "1.1"
 secrecy = { version = "0.10", features = ["serde"] }
 zeroize = { version = "1.8", features = ["derive"] }
 rand = "0.10"
@@ -141,7 +141,7 @@ crossbeam-channel = "0.5"
 rayon = "1.12"
 
 # Time
-chrono = { version = "0.4.44", features = ["serde"] }
+chrono = { version = "0.4.45", features = ["serde"] }
 
 # UUID
 uuid = { version = "1.23", features = ["v4", "serde"] }
