@@ -610,7 +610,7 @@ fingerprint = "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF"
         let manifest = Manifest::from_str(content).unwrap();
         assert_eq!(manifest.security.maven.trusted_keys.len(), 1);
         assert!(manifest.security.maven.first_install.is_none());
-        assert!(manifest.security.maven.keyservers.is_empty());
+        assert_eq!(manifest.security.maven.keyservers, Vec::<String>::new());
     }
 
     #[test]
