@@ -2,3 +2,5 @@
 .strategy
 
 .DS_Store
+# Extra git checkouts of this repo (git worktree add .worktrees/<name>).
+.worktrees/

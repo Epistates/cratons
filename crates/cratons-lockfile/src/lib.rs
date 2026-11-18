@@ -1440,7 +1440,7 @@ mod tests {
         };
 
         assert_eq!(pin.version, "1.75.0");
-        assert!(!pin.url.is_empty());
+        assert_ne!(pin.url, "");
     }
 
     // ==========================================================================
@@ -1704,7 +1704,7 @@ schema-version = 99
 
         let signature = lockfile.signature.as_ref().unwrap();
         assert_eq!(signature.algorithm, "ed25519");
-        assert!(!signature.signature.is_empty());
+        assert_ne!(signature.signature, "");
         // Signature should be 64 bytes base64-encoded
         assert!(signature.signature.len() > 80); // Base64 of 64 bytes is ~88 chars
         assert!(signature.key_id.is_none());
@@ -1864,7 +1864,7 @@ schema-version = 99
         assert!(parsed.signature.is_some());
         let signature = parsed.signature.as_ref().unwrap();
         assert_eq!(signature.algorithm, "ed25519");
-        assert!(!signature.signature.is_empty());
+        assert_ne!(signature.signature, "");
     }
 
     /// Test signature with optional key_id field.
